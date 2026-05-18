@@ -13,7 +13,7 @@ jobs:
   # xcodegen or the .app target, so this job runs fast and gates the rest.
   test-core:
     name: PlateCore tests
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Show toolchain
@@ -27,7 +27,7 @@ jobs:
   build-debug:
     name: PlateApp (Debug)
     needs: test-core
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install xcodegen + xcbeautify
@@ -37,7 +37,12 @@ jobs:
         run: xcodegen generate
       - name: xcodebuild Debug
         working-directory: PlateApp
+        # pipefail so a failure in xcodebuild propagates out of the
+        # `| xcbeautify` pipe — without it, xcbeautify's exit code wins and
+        # red builds masquerade as green.
+        shell: bash
         run: |
+          set -o pipefail
           xcodebuild \
             -project PlateApp.xcodeproj \
             -scheme PlateApp \
@@ -57,7 +62,7 @@ jobs:
   build-release:
     name: PlateApp (Release)
     needs: test-core
-    runs-on: macos-14
+    runs-on: macos-15
     if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +76,9 @@ jobs:
 
       - name: xcodebuild Release
         working-directory: PlateApp
+        shell: bash
         run: |
+          set -o pipefail
           xcodebuild \
             -project PlateApp.xcodeproj \
             -scheme PlateApp \
