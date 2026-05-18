@@ -1,0 +1,39 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- "Letterpress P" — the P sits as a physical printing plate, embossed
+       into the warm dark surface. References letterpress / etching plates
+       which is what "Plate" literally is in the print world. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#231D1A"/>
+      <stop offset="1" stop-color="#15110F"/>
+    </linearGradient>
+    <!-- Letterpress emboss: highlight on top-left, shadow on bottom-right -->
+    <filter id="emboss" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dx="-3" dy="-3" result="ulHL"/>
+      <feFlood flood-color="#E8DDD0" flood-opacity="0.5"/>
+      <feComposite in2="ulHL" operator="in" result="ulHi"/>
+
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dx="4" dy="6" result="brSh"/>
+      <feFlood flood-color="#000000" flood-opacity="0.6"/>
+      <feComposite in2="brSh" operator="in" result="brShad"/>
+
+      <feMerge>
+        <feMergeNode in="brShad"/>
+        <feMergeNode in="SourceGraphic"/>
+        <feMergeNode in="ulHi"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <text x="512" y="780"
+        text-anchor="middle"
+        font-family="'Iowan Old Style', Charter, Georgia, serif"
+        font-size="780"
+        font-weight="700"
+        fill="#3a2e26"
+        filter="url(#emboss)">P</text>
+  <!-- Small coral square — print-plate corner registration -->
+  <rect x="780" y="780" width="40" height="40" fill="#D97757"/>
+</svg>

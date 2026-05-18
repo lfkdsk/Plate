@@ -1,0 +1,39 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- "PLATE" wordmark inside a thin photo-plate frame. Editorial mono caps
+       evoke a contact-sheet annotation; coral registration mark in corner
+       references print-plate proofing. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#231D1A"/>
+      <stop offset="1" stop-color="#15110F"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+
+  <!-- Photo plate frame -->
+  <rect x="180" y="240" width="664" height="544"
+        fill="none" stroke="#E8DDD0" stroke-width="6" rx="4"/>
+
+  <!-- Big serif P inside frame -->
+  <text x="512" y="660"
+        text-anchor="middle"
+        font-family="'Iowan Old Style', Charter, Georgia, serif"
+        font-size="480"
+        font-weight="700"
+        fill="#E8DDD0">P</text>
+
+  <!-- Corner registration mark (coral) -->
+  <g stroke="#D97757" stroke-width="6" fill="none">
+    <line x1="180" y1="220" x2="220" y2="220"/>
+    <line x1="180" y1="220" x2="180" y2="260"/>
+  </g>
+
+  <!-- Tiny mono caps under frame -->
+  <text x="512" y="850"
+        text-anchor="middle"
+        font-family="'SF Mono', Menlo, Courier, monospace"
+        font-size="44"
+        font-weight="600"
+        fill="#8B7355"
+        letter-spacing="14">PLATE</text>
+</svg>

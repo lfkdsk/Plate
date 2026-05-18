@@ -1,0 +1,33 @@
+# macOS finder droppings
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+# Package.resolved is committed — keeps the lockfile reproducible for the app.
+# (SPM convention: commit for executables/apps, ignore for libraries. Plate
+# ships an app + a CLI, so we want lockfile-style reproducibility.)
+
+# Xcode user data and intermediates
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.xcscheme.bak
+
+# xcodegen-generated. project.yml is the source of truth; the .xcodeproj is
+# regenerated on every machine by running `xcodegen generate` inside PlateApp/.
+PlateApp/PlateApp.xcodeproj/
+
+# Stale local build folders (we used to land builds here before switching to
+# DerivedData)
+PlateApp/build/
+build/
+
+# Intermediate icon outputs — the .icns files committed under PlateApp/PlateApp/
+# are what the build needs. The .iconset/ directories and preview PNGs under
+# Branding/ are regeneratable from the source SVGs via scripts/build-icons.sh.
+Branding/*.iconset/
+Branding/*.png
+
+# Compiled CLI binary if someone runs `swift build` locally
+.build/

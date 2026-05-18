@@ -1,0 +1,64 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Plate Library document icon. Cream paper + top-right fold corner is the
+       macOS document-icon convention (Pages / Numbers / TextEdit / etc.). The
+       italic p mark + coral terminal stays in lockstep with the app icon so
+       the two read as siblings rather than strangers — but Finder can still
+       tell at a glance that one is a document and one is an app. -->
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F5EFE6"/>
+      <stop offset="1" stop-color="#E8DDD0"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D4C8B6"/>
+      <stop offset="1" stop-color="#B7A88F"/>
+    </linearGradient>
+    <!-- Page drop shadow for depth -->
+    <filter id="pageShadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8"/>
+      <feOffset dx="0" dy="6" result="off"/>
+      <feFlood flood-color="#000000" flood-opacity="0.18"/>
+      <feComposite in2="off" operator="in" result="sh"/>
+      <feMerge>
+        <feMergeNode in="sh"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Page silhouette: top-left → top-right (minus fold) → bottom-right → bottom-left.
+       Slight rounded corners (12px) — sharper than the app icon's squircle so it
+       reads as paper rather than another iOS-style tile. -->
+  <g filter="url(#pageShadow)">
+    <path d="M 154 120
+             L 728 120
+             L 904 296
+             L 904 894
+             A 18 18 0 0 1 886 912
+             L 154 912
+             A 18 18 0 0 1 136 894
+             L 136 138
+             A 18 18 0 0 1 154 120 Z" fill="url(#paper)"/>
+
+    <!-- Folded corner — triangle in slightly darker tone -->
+    <path d="M 728 120
+             L 904 296
+             L 728 296 Z" fill="url(#fold)"/>
+    <!-- Fold crease line for a little more depth -->
+    <path d="M 728 120 L 728 296 L 904 296"
+          fill="none" stroke="#9C8E76" stroke-width="2" stroke-opacity="0.4"/>
+  </g>
+
+  <!-- Italic p — same letterform as the app icon, but in dark warm on cream
+       instead of cream on dark warm. -->
+  <text x="528" y="800"
+        text-anchor="middle"
+        font-family="'Iowan Old Style', Charter, Georgia, serif"
+        font-size="700"
+        font-weight="500"
+        font-style="italic"
+        fill="#1A1614">p</text>
+
+  <!-- Coral terminal under the descender — same accent placement as app icon -->
+  <rect x="304" y="826" width="100" height="5" fill="#D97757"/>
+</svg>

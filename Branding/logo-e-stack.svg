@@ -1,0 +1,29 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- "Plate stack" — a slight isometric stack of photo plates, the way you
+       might hold a sleeve of glass-plate negatives. Top plate is brighter
+       cream, the ones beneath fade into shadow. Coral marker on the top plate
+       hints at "current / selected". No letter — pure visual metaphor. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#231D1A"/>
+      <stop offset="1" stop-color="#15110F"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+
+  <!-- Bottom plate (deepest, most shadow) -->
+  <g transform="translate(220 600) rotate(-7)">
+    <rect width="600" height="380" rx="14" fill="#3a2e26"/>
+  </g>
+  <!-- Middle plate -->
+  <g transform="translate(200 480) rotate(-3)">
+    <rect width="620" height="380" rx="14" fill="#6d5849"/>
+  </g>
+  <!-- Top plate, full cream -->
+  <g transform="translate(180 360) rotate(0)">
+    <rect width="660" height="380" rx="14" fill="#E8DDD0"/>
+    <!-- Coral corner accent -->
+    <rect x="32" y="32" width="16" height="56" fill="#D97757"/>
+    <rect x="32" y="32" width="56" height="16" fill="#D97757"/>
+  </g>
+</svg>

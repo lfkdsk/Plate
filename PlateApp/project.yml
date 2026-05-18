@@ -1,0 +1,42 @@
+name: PlateApp
+options:
+  bundleIdPrefix: com.lfkdsk
+  deploymentTarget:
+    macOS: "10.15"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_HARDENED_RUNTIME: NO
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+
+packages:
+  PlateCore:
+    path: ..
+
+targets:
+  PlateApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: PlateApp
+        excludes:
+          - "Info.plist"
+    dependencies:
+      - package: PlateCore
+        product: PlateCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lfkdsk.Plate
+        PRODUCT_NAME: Plate
+        MACOSX_DEPLOYMENT_TARGET: "10.15"
+        INFOPLIST_FILE: PlateApp/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO

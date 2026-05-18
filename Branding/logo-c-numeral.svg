@@ -1,0 +1,33 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- "Plate. I" — the most literal book-plate quote: the way fine-art
+       publishers caption their illustrations ("Plate I, Plate II, …").
+       A bold serif "P" with a coral italic Roman numeral I — the I doubles
+       as both "first" and an aperture-blade mark. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#231D1A"/>
+      <stop offset="1" stop-color="#15110F"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+
+  <!-- Serif P -->
+  <text x="370" y="760"
+        text-anchor="middle"
+        font-family="'Iowan Old Style', Charter, Georgia, serif"
+        font-size="720"
+        font-weight="700"
+        fill="#E8DDD0">P</text>
+
+  <!-- Coral period -->
+  <circle cx="640" cy="720" r="38" fill="#D97757"/>
+
+  <!-- Italic Roman numeral I -->
+  <text x="780" y="740"
+        text-anchor="middle"
+        font-family="'Iowan Old Style', Charter, Georgia, serif"
+        font-size="380"
+        font-style="italic"
+        font-weight="500"
+        fill="#D97757">I</text>
+</svg>

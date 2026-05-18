@@ -1,0 +1,24 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Italic lowercase "p" — much less common as an app mark than uppercase
+       Roman P, so it dodges the Pinterest/Pages/Polaroid neighbourhood
+       entirely. The descender does extra work: gives the icon vertical motion
+       and a distinctive silhouette. Coral underline ends the descender, like
+       a serif terminal pulled into a tinted accent. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#231D1A"/>
+      <stop offset="1" stop-color="#15110F"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+
+  <text x="512" y="830"
+        text-anchor="middle"
+        font-family="'Iowan Old Style', Charter, Georgia, serif"
+        font-size="900"
+        font-weight="500"
+        font-style="italic"
+        fill="#E8DDD0">p</text>
+  <!-- Coral terminal — small accent at the foot of the descender -->
+  <rect x="200" y="850" width="130" height="6" fill="#D97757"/>
+</svg>
