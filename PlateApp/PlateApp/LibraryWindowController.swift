@@ -1,7 +1,7 @@
 import AppKit
 import PlateCore
 
-final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
+final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMenuDelegate {
 
     private weak var libraryDocument: PlateDocument?
     /// Held strong so its scroll position / selection survive a detour through
@@ -17,6 +17,7 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
     private weak var progressSpinner: NSProgressIndicator?
     private weak var progressCountLabel: NSTextField?
     private weak var viewModeSegment: NSSegmentedControl?
+    private weak var sortToolbarMenu: NSMenu?
 
     init(document: PlateDocument) {
         self.libraryDocument = document
@@ -97,6 +98,14 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
+        // Force-centre the Year/Month/All Photos switcher. Two flanking
+        // flexibleSpaces alone don't reliably centre it on macOS 11+ (the
+        // trailing items pull it right); centeredItemIdentifier pins it to the
+        // middle of the content region regardless. The flexes remain as the
+        // 10.15 fallback where this property doesn't exist.
+        if #available(macOS 11.0, *) {
+            toolbar.centeredItemIdentifier = TID.viewMode
+        }
         window.toolbar = toolbar
 
         // NSScreen.screens.first is the user-designated main display (the one with
@@ -299,20 +308,39 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
         static let zoom     = NSToolbarItem.Identifier("Plate.zoom")
         static let progress = NSToolbarItem.Identifier("Plate.progress")
         static let viewMode = NSToolbarItem.Identifier("Plate.viewMode")
+        static let sort     = NSToolbarItem.Identifier("Plate.sort")
     }
 
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, TID.zoom, TID.progress, TID.viewMode, .flexibleSpace, .space]
+        var ids: [NSToolbarItem.Identifier] =
+            [.toggleSidebar, TID.zoom, TID.progress, TID.viewMode, TID.sort, .flexibleSpace, .space]
+        if #available(macOS 11.0, *) { ids.append(.sidebarTrackingSeparator) }
+        return ids
     }
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        // Single-row layout: sidebar toggle at the leading edge (auto-rendered
-        // by AppKit — clicking it calls NSSplitViewController.toggleSidebar),
-        // flexible gap → viewMode (~ centre) → flexible gap → progress + zoom
-        // pinned to the right edge. Two flexes flanking viewMode mean both
-        // expand (neither is trailing), so viewMode actually lands in
-        // approximate centre instead of being shoved aside by a collapsing
-        // tail flex.
-        [.toggleSidebar, .flexibleSpace, TID.viewMode, .flexibleSpace, TID.progress, TID.zoom]
+        // Photos-style single row:
+        //   sidebar toggle (over the sidebar) ┊ sidebarTrackingSeparator ┊
+        //   flex → viewMode (centred in the content pane) → flex →
+        //   sort + zoom pinned to the trailing edge.
+        //
+        // The sidebarTrackingSeparator pins the toolbar's divider to the sidebar
+        // split divider, so the toggle sits above the sidebar and the centring
+        // flexes measure the *content* region — otherwise every control bunches
+        // up on the right with dead space on the left. (11+ only; on 10.15 it's
+        // omitted and AppKit falls back to a plain continuous bar.)
+        //
+        // A fixed `.space` separates sort from zoom so Tahoe renders them as two
+        // distinct pills rather than fusing them into one rounded background.
+        //
+        // TID.progress is intentionally absent: Tahoe groups adjacent items into
+        // one background, so a permanently-present (idle/empty) progress item
+        // would leave dead space inside the zoom pill. It's inserted on demand
+        // during import/rebuild and removed when finished (see applyImportPhase
+        // / setProgressItemVisible).
+        var ids: [NSToolbarItem.Identifier] = [.toggleSidebar]
+        if #available(macOS 11.0, *) { ids.append(.sidebarTrackingSeparator) }
+        ids += [.flexibleSpace, TID.viewMode, .flexibleSpace, TID.sort, .space, TID.zoom]
+        return ids
     }
 
     func toolbar(_ t: NSToolbar,
@@ -334,6 +362,36 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
             seg.controlSize = .regular
             self.viewModeSegment = seg
             item.view = seg
+            return item
+
+        case TID.sort:
+            // Pull-down with a sort glyph + chevron. Clicking pops the menu;
+            // checkmarks are refreshed on open via menuNeedsUpdate so they
+            // always mirror the library's current order (which the View ▸
+            // Sort By menu can also change).
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.label = "Sort"
+            item.paletteLabel = "Sort"
+            item.toolTip = "Sort photos by capture date"
+            item.image = symbol("arrow.up.arrow.down",
+                                 fallback: NSImage.Name("NSListViewTemplate"))
+            let menu = NSMenu()
+            menu.delegate = self
+            let newest = NSMenuItem(title: "Newest First",
+                                    action: #selector(toolbarSort(_:)),
+                                    keyEquivalent: "")
+            newest.target = self
+            newest.tag = 0
+            let oldest = NSMenuItem(title: "Oldest First",
+                                    action: #selector(toolbarSort(_:)),
+                                    keyEquivalent: "")
+            oldest.target = self
+            oldest.tag = 1
+            menu.addItem(newest)
+            menu.addItem(oldest)
+            item.menu = menu
+            item.showsIndicator = true
+            self.sortToolbarMenu = menu
             return item
 
         case TID.progress:
@@ -441,6 +499,22 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
         libraryViewController?.setDisplayMode(mode)
     }
 
+    @objc private func toolbarSort(_ sender: NSMenuItem) {
+        libraryViewController?.setSortOrder(sender.tag == 0 ? .newestFirst : .oldestFirst)
+    }
+
+    // MARK: - NSMenuDelegate
+
+    /// Refresh the Sort pull-down's checkmarks to match the library's current
+    /// order each time it opens. Tag 0 = newest, 1 = oldest.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === sortToolbarMenu else { return }
+        let isNewest = (libraryViewController?.sortOrder ?? .newestFirst) == .newestFirst
+        for mi in menu.items {
+            mi.state = (mi.tag == 0) == isNewest ? .on : .off
+        }
+    }
+
     /// Called when the view controller drills down programmatically (clicking
     /// a Year / Month card) so the segmented control reflects the new level.
     private func syncViewModeSegment(_ mode: LibraryViewController.DisplayMode) {
@@ -459,10 +533,12 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
     fileprivate func applyImportPhase(_ phase: LibraryViewController.ImportPhase) {
         switch phase {
         case .scanning:
+            setProgressItemVisible(true)
             progressSpinner?.startAnimation(nil)
             progressCountLabel?.isHidden = true
             progressCountLabel?.stringValue = ""
         case .progress(let completed, let total):
+            setProgressItemVisible(true)
             progressSpinner?.startAnimation(nil)
             progressCountLabel?.isHidden = total <= 0
             progressCountLabel?.stringValue = total > 0 ? "\(completed) / \(total)" : ""
@@ -470,6 +546,24 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate {
             progressSpinner?.stopAnimation(nil)
             progressCountLabel?.isHidden = true
             progressCountLabel?.stringValue = ""
+            setProgressItemVisible(false)
+        }
+    }
+
+    /// Insert the import-progress item just left of the zoom slider while a
+    /// scan/import/rebuild runs, and pull it back out when idle. Keeping it out
+    /// of the toolbar when there's nothing to report avoids the empty gap Tahoe
+    /// would otherwise draw inside the zoom item's grouped background.
+    private func setProgressItemVisible(_ visible: Bool) {
+        guard let toolbar = window?.toolbar else { return }
+        let existing = toolbar.items.firstIndex { $0.itemIdentifier == TID.progress }
+        if visible {
+            guard existing == nil else { return }
+            let insertAt = toolbar.items.firstIndex { $0.itemIdentifier == TID.zoom }
+                ?? toolbar.items.count
+            toolbar.insertItem(withItemIdentifier: TID.progress, at: insertAt)
+        } else if let idx = existing {
+            toolbar.removeItem(at: idx)
         }
     }
 

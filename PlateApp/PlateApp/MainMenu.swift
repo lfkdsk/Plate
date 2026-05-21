@@ -101,6 +101,24 @@ enum MainMenu {
         menu.addItem(.init(title: "Smaller Thumbnails",
                            action: #selector(LibraryWindowController.zoomOut(_:)),
                            keyEquivalent: "-"))
+        menu.addItem(.separator())
+        // Sort By → capture-date direction. Items carry a checkmark for the
+        // active order via LibraryViewController.validateMenuItem; tag 0 = newest,
+        // tag 1 = oldest. Actions reach the library VC through the responder chain.
+        let sortItem = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
+        let sortMenu = NSMenu(title: "Sort By")
+        let newestFirst = NSMenuItem(title: "Newest First",
+                                     action: #selector(LibraryViewController.sortFromMenu(_:)),
+                                     keyEquivalent: "")
+        newestFirst.tag = 0
+        let oldestFirst = NSMenuItem(title: "Oldest First",
+                                     action: #selector(LibraryViewController.sortFromMenu(_:)),
+                                     keyEquivalent: "")
+        oldestFirst.tag = 1
+        sortMenu.addItem(newestFirst)
+        sortMenu.addItem(oldestFirst)
+        sortItem.submenu = sortMenu
+        menu.addItem(sortItem)
         item.submenu = menu
         return item
     }

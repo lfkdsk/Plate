@@ -18,6 +18,15 @@ final class AssetItemView: NSCollectionViewItem {
     /// Aggregate (Year / Month) tiles don't expose the favorite affordance —
     /// clicking would imply favoriting the whole period.
     private var isAggregateTile = false
+    /// Whether the data source supplied a format badge for this tile. The pill is
+    /// only actually shown when this is true AND the tile is large enough — see
+    /// `updateBadgeVisibility()`.
+    private var hasBadge = false
+
+    /// Below this tile height the format pill is suppressed: on a zoomed-out
+    /// "contact sheet" the "HEIF + RAW" label dominates the thumbnail and adds
+    /// noise rather than information. Tunable.
+    private static let badgeMinTileHeight: CGFloat = 90
     /// Fires when the user clicks the heart button on this tile. The data
     /// source flips the asset's favorite state in PlateCore and reloads.
     var onToggleFavorite: (() -> Void)?
@@ -139,6 +148,14 @@ final class AssetItemView: NSCollectionViewItem {
         super.viewDidLayout()
         hoverOverlay.frame = view.bounds
         bigOverlayDimmer.frame = view.bounds
+        // Tile size changes on zoom; re-evaluate whether the badge fits.
+        updateBadgeVisibility()
+    }
+
+    /// Show the format pill only when there's a badge AND the tile is tall
+    /// enough to carry it without crowding the photo.
+    private func updateBadgeVisibility() {
+        badgePill.isHidden = !hasBadge || view.bounds.height < Self.badgeMinTileHeight
     }
 
     override var isSelected: Bool {
@@ -184,11 +201,12 @@ final class AssetItemView: NSCollectionViewItem {
                 .kern: 0.6,
             ], range: NSRange(location: 0, length: attr.length))
             badgeLabel.attributedStringValue = attr
-            badgePill.isHidden = false
+            hasBadge = true
         } else {
             badgeLabel.stringValue = ""
-            badgePill.isHidden = true
+            hasBadge = false
         }
+        updateBadgeVisibility()
 
         if let big = bigOverlay, !big.isEmpty {
             // Large serif period label (Year "2024" or "April 2026"), white with
@@ -219,6 +237,7 @@ final class AssetItemView: NSCollectionViewItem {
         hoverOverlay.opacity = 0
         badgeLabel.stringValue = ""
         badgePill.isHidden = true
+        hasBadge = false
         bigOverlayLabel.stringValue = ""
         bigOverlayLabel.isHidden = true
         bigOverlayDimmer.isHidden = true

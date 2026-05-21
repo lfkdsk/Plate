@@ -25,8 +25,16 @@ final class DetailViewController: NSViewController {
     private let strip = ThumbnailStrip()
     private let closeButton: FloatingButton
     private let favoriteButton: FloatingButton
+    private let infoButton: FloatingButton
     private let prevButton: FloatingButton
     private let nextButton: FloatingButton
+
+    /// Top-right EXIF panel, toggled by the info button. A chrome subview so it
+    /// fades with the rest of the overlay; `exifVisible` keeps it shown across
+    /// prev/next navigation until the user dismisses it.
+    private let exifPanel = NSVisualEffectView()
+    private let exifLabel = NSTextField(labelWithString: "")
+    private var exifVisible = false
 
     private static let captionDateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -45,6 +53,10 @@ final class DetailViewController: NSViewController {
     private var loadedAtMaxPixel: Int = 0
     private static let fastMaxPixel: Int = 4096
     private static let detailMaxPixel: Int = 8192
+    /// The lightweight (fastMaxPixel) decode of the *current* asset, kept around
+    /// so we can swap straight back to it when the user zooms out — no re-decode,
+    /// and the heavy detail image is released instead of lingering in memory.
+    private var fastImage: NSImage?
 
     init(library: PlateLibrary,
          assets: [Asset],
@@ -57,11 +69,13 @@ final class DetailViewController: NSViewController {
         self.onClose = onClose
         self.closeButton    = FloatingButton(symbol: "xmark",          size: 28, weight: .medium)
         self.favoriteButton = FloatingButton(symbol: "heart",          size: 28, weight: .medium)
+        self.infoButton     = FloatingButton(symbol: "info.circle",    size: 28, weight: .medium)
         self.prevButton     = FloatingButton(symbol: "chevron.left",   size: 44, weight: .regular)
         self.nextButton     = FloatingButton(symbol: "chevron.right",  size: 44, weight: .regular)
         super.init(nibName: nil, bundle: nil)
         self.closeButton.action    = { [weak self] in self?.close(nil) }
         self.favoriteButton.action = { [weak self] in self?.toggleFavorite(nil) }
+        self.infoButton.action     = { [weak self] in self?.toggleExif() }
         self.prevButton.action     = { [weak self] in self?.previous(nil) }
         self.nextButton.action     = { [weak self] in self?.nextItem(nil) }
     }
@@ -135,7 +149,7 @@ final class DetailViewController: NSViewController {
         }
         strip.translatesAutoresizingMaskIntoConstraints = false
 
-        for sub in [closeButton, favoriteButton, prevButton, nextButton, strip, captionPill] {
+        for sub in [closeButton, favoriteButton, infoButton, prevButton, nextButton, strip, captionPill, exifPanel] {
             sub.translatesAutoresizingMaskIntoConstraints = false
             chrome.addSubview(sub)
         }
@@ -143,6 +157,21 @@ final class DetailViewController: NSViewController {
         metaLabel.translatesAutoresizingMaskIntoConstraints = false
         captionPill.addSubview(titleLabel)
         captionPill.addSubview(metaLabel)
+
+        // EXIF panel — HUD pill in the top-right, mirroring the caption pill's
+        // material. Hidden until the user taps the info button.
+        exifPanel.material = .hudWindow
+        exifPanel.state = .active
+        exifPanel.blendingMode = .withinWindow
+        exifPanel.wantsLayer = true
+        exifPanel.layer?.cornerRadius = 6
+        exifPanel.layer?.masksToBounds = true
+        exifPanel.isHidden = true
+        exifLabel.maximumNumberOfLines = 0
+        exifLabel.lineBreakMode = .byWordWrapping
+        exifLabel.alignment = .left
+        exifLabel.translatesAutoresizingMaskIntoConstraints = false
+        exifPanel.addSubview(exifLabel)
 
         NSLayoutConstraint.activate([
             // Scrollable image (with magnification) fills the entire content area.
@@ -167,6 +196,22 @@ final class DetailViewController: NSViewController {
             favoriteButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             favoriteButton.widthAnchor.constraint(equalToConstant: 28),
             favoriteButton.heightAnchor.constraint(equalToConstant: 28),
+
+            // Info (EXIF) — right of favorite.
+            infoButton.leadingAnchor.constraint(equalTo: favoriteButton.trailingAnchor, constant: 10),
+            infoButton.centerYAnchor.constraint(equalTo: favoriteButton.centerYAnchor),
+            infoButton.widthAnchor.constraint(equalToConstant: 28),
+            infoButton.heightAnchor.constraint(equalToConstant: 28),
+
+            // EXIF panel pinned top-right, below the traffic-light row.
+            exifPanel.trailingAnchor.constraint(equalTo: chrome.trailingAnchor, constant: -20),
+            exifPanel.topAnchor.constraint(equalTo: chrome.topAnchor, constant: 12),
+            exifPanel.widthAnchor.constraint(lessThanOrEqualToConstant: 340),
+
+            exifLabel.topAnchor.constraint(equalTo: exifPanel.topAnchor, constant: 12),
+            exifLabel.leadingAnchor.constraint(equalTo: exifPanel.leadingAnchor, constant: 14),
+            exifLabel.trailingAnchor.constraint(equalTo: exifPanel.trailingAnchor, constant: -14),
+            exifLabel.bottomAnchor.constraint(equalTo: exifPanel.bottomAnchor, constant: -12),
 
             // Prev / next pinned to left/right edges, vertically centered.
             prevButton.leadingAnchor.constraint(equalTo: chrome.leadingAnchor, constant: 20),
@@ -293,6 +338,7 @@ final class DetailViewController: NSViewController {
         nextButton.isEnabled = currentIndex < assets.count - 1
         strip.currentIndex = currentIndex
         refreshFavoriteIcon()
+        if exifVisible { populateExif() }
 
         // Keep the prior image visible until the new one decodes — no flash.
         loadGeneration &+= 1
@@ -305,6 +351,7 @@ final class DetailViewController: NSViewController {
             DispatchQueue.main.async {
                 guard let self = self, self.loadGeneration == generation else { return }
                 if let image = image {
+                    self.fastImage = image
                     self.crossfadeImage()
                     self.applyImage(image)
                     self.loadedAtMaxPixel = targetMaxPixel
@@ -330,6 +377,23 @@ final class DetailViewController: NSViewController {
 
     @objc private func didEndLiveMagnify(_ note: Notification) {
         upgradeIfNeeded()
+        downgradeIfNeeded()
+    }
+
+    /// Symmetric counterpart to `upgradeIfNeeded`: once the user zooms back to
+    /// (essentially) fit, swap the heavy detail image out for the cached
+    /// lightweight one. At fit the two are visually identical (both downscaled),
+    /// but this releases the ~200MB detail bitmap so the zoomed-out state — and
+    /// the next zoom gesture — start light instead of dragging the giant image
+    /// around. The guards are mutually exclusive with the upgrade's (>1.5×).
+    private func downgradeIfNeeded() {
+        let fit = imageScrollView.minMagnification
+        guard fit > 0 else { return }
+        let zoomFactor = imageScrollView.magnification / fit
+        guard zoomFactor <= 1.05 else { return }
+        guard loadedAtMaxPixel > Self.fastMaxPixel, let fast = fastImage else { return }
+        loadedAtMaxPixel = Self.fastMaxPixel
+        replaceImagePreservingZoom(fast)
     }
 
     private func upgradeIfNeeded() {
@@ -352,7 +416,11 @@ final class DetailViewController: NSViewController {
                 guard let self = self,
                       self.loadGeneration == snapshotGen,
                       let image = image else { return }
-                self.crossfadeImage()
+                // No crossfade here: this is the *same* photo at higher
+                // resolution. Cross-dissolving it ghosts/flickers because the
+                // documentView frame doubles mid-transition (the before/after
+                // layer snapshots are at different scales). An instant,
+                // geometry-preserving swap reads as "it just got sharper".
                 self.replaceImagePreservingZoom(image)
             }
         }
@@ -378,11 +446,21 @@ final class DetailViewController: NSViewController {
         let centerOldX = oldClipBounds.origin.x + oldClipBounds.size.width  / 2
         let centerOldY = oldClipBounds.origin.y + oldClipBounds.size.height / 2
 
+        let scaleX = image.size.width  / oldImgWidth
+        let scaleY = image.size.height / oldImgHeight
+
+        // Apply the document resize, magnification, and re-center as one atomic,
+        // non-animated batch. Disabling implicit actions stops the (now
+        // layer-backed) image view from animating its contents/bounds, and doing
+        // it all inside one CATransaction keeps AppKit from rendering the
+        // transient "frame doubled but magnification not yet halved" state — that
+        // intermediate is the flicker.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
         // Resize document.
         imageView.image = image
         imageView.frame = NSRect(origin: .zero, size: image.size)
-        let scaleX = image.size.width  / oldImgWidth
-        let scaleY = image.size.height / oldImgHeight
 
         // New fit + preserved-visual-zoom magnification.
         let scrollSize = imageScrollView.frame.size
@@ -404,6 +482,8 @@ final class DetailViewController: NSViewController {
         )
         imageScrollView.contentView.scroll(to: newOrigin)
         imageScrollView.reflectScrolledClipView(imageScrollView.contentView)
+
+        CATransaction.commit()
     }
 
     /// Set the image into the scrollable view at its native pixel size, then
@@ -476,6 +556,126 @@ final class DetailViewController: NSViewController {
         favoriteButton.setSymbol(isFav ? "heart.fill" : "heart",
                                  tint: isFav ? PlateColor.accent : nil)
     }
+    // MARK: - EXIF panel
+
+    @objc private func toggleExif() {
+        exifVisible.toggle()
+        exifPanel.isHidden = !exifVisible
+        infoButton.setSymbol(exifVisible ? "info.circle.fill" : "info.circle",
+                             tint: exifVisible ? PlateColor.accent : nil)
+        if exifVisible { populateExif() }
+        showChrome()
+    }
+
+    /// Read EXIF for the current asset off-main and drop it into the panel.
+    /// Guarded by `currentIndex` so a slow read for a since-navigated-away photo
+    /// can't clobber the panel.
+    private func populateExif() {
+        guard currentIndex >= 0, currentIndex < assets.count else { return }
+        let idx = currentIndex
+        let asset = assets[idx]
+        let url = library.absoluteURL(forRelative: asset.primary)
+        exifLabel.attributedStringValue = Self.exifPlaceholder("Reading…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let info = ExifInfo.read(url: url)
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size])
+                .flatMap { ($0 as? NSNumber)?.int64Value }
+            let text = Self.formatExif(info, fileSize: size)
+            DispatchQueue.main.async {
+                guard let self = self, self.exifVisible, self.currentIndex == idx else { return }
+                self.exifLabel.attributedStringValue = text
+            }
+        }
+    }
+
+    private static let exifDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy 'at' HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    private static func exifPlaceholder(_ s: String) -> NSAttributedString {
+        NSAttributedString(string: s, attributes: [
+            .font: PlateFont.mono(11),
+            .foregroundColor: PlateColor.textMuted,
+        ])
+    }
+
+    /// Build the multi-line EXIF block. Camera/lens lines read as primary text;
+    /// the technical lines (exposure, dimensions, date, GPS) are muted. Missing
+    /// fields are simply omitted.
+    private static func formatExif(_ info: ExifInfo, fileSize: Int64?) -> NSAttributedString {
+        let primary: [NSAttributedString.Key: Any] = [
+            .font: PlateFont.mono(11, weight: .medium),
+            .foregroundColor: PlateColor.textPrimary,
+        ]
+        let muted: [NSAttributedString.Key: Any] = [
+            .font: PlateFont.mono(10),
+            .foregroundColor: PlateColor.textMuted,
+            .kern: 0.3,
+        ]
+
+        var lines: [(String, [NSAttributedString.Key: Any])] = []
+
+        let camera = [info.cameraMake, info.cameraModel]
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if !camera.isEmpty { lines.append((camera, primary)) }
+        if let lens = info.lensModel?.trimmingCharacters(in: .whitespaces), !lens.isEmpty {
+            lines.append((lens, primary))
+        }
+
+        var exposure: [String] = []
+        if let iso = info.iso { exposure.append("ISO \(iso)") }
+        if let t = info.exposureTime { exposure.append(shutterString(t)) }
+        if let f = info.fNumber { exposure.append("ƒ/\(numString(f))") }
+        if let fl = info.focalLength { exposure.append("\(numString(fl))mm") }
+        if !exposure.isEmpty { lines.append((exposure.joined(separator: "  ·  "), muted)) }
+
+        var dims: [String] = []
+        if let w = info.pixelWidth, let h = info.pixelHeight {
+            dims.append("\(w) × \(h)")
+            let mp = Double(w * h) / 1_000_000
+            if mp >= 1 { dims.append("\(numString(mp)) MP") }
+        }
+        if let bytes = fileSize {
+            dims.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+        }
+        if !dims.isEmpty { lines.append((dims.joined(separator: "  ·  "), muted)) }
+
+        if let d = info.capturedAt { lines.append((exifDateFormatter.string(from: d), muted)) }
+        if let lat = info.latitude, let lon = info.longitude {
+            lines.append((String(format: "%.5f, %.5f", lat, lon), muted))
+        }
+
+        if lines.isEmpty { return exifPlaceholder("No EXIF metadata") }
+
+        let out = NSMutableAttributedString()
+        for (i, line) in lines.enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: "\n")) }
+            out.append(NSAttributedString(string: line.0, attributes: line.1))
+        }
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 2
+        out.addAttribute(.paragraphStyle, value: para,
+                         range: NSRange(location: 0, length: out.length))
+        return out
+    }
+
+    /// "1/250s", "2s", "1.3s" — EXIF shutter speed in conventional notation.
+    private static func shutterString(_ t: Double) -> String {
+        if t >= 1 { return "\(numString(t))s" }
+        guard t > 0 else { return "—" }
+        return "1/\(Int((1 / t).rounded()))s"
+    }
+
+    /// Drop a trailing ".0" but keep one decimal otherwise ("2.8", "38", "1.3").
+    private static func numString(_ v: Double) -> String {
+        v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+    }
+
     @objc func previous(_ sender: Any?) {
         guard currentIndex > 0 else { return }
         currentIndex -= 1
@@ -792,6 +992,79 @@ private final class ThumbnailCell: NSView {
 
 /// Round HUD button with semi-transparent dark fill, hover ring in faint warm
 /// neutral, and pressed/disabled states. Used for close + prev + next.
+// MARK: - EXIF reader
+
+/// On-demand EXIF extraction for the detail panel. Reads a single ImageIO
+/// property pass from the asset's primary file (display master or RAW — ImageIO
+/// surfaces EXIF for both). Display-only, so it lives in the app rather than
+/// PlateCore.
+private struct ExifInfo {
+    var cameraMake: String?
+    var cameraModel: String?
+    var lensModel: String?
+    var iso: Int?
+    var exposureTime: Double?
+    var fNumber: Double?
+    var focalLength: Double?
+    var pixelWidth: Int?
+    var pixelHeight: Int?
+    var capturedAt: Date?
+    var latitude: Double?
+    var longitude: Double?
+
+    private static let exifDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        return f
+    }()
+
+    static func read(url: URL) -> ExifInfo {
+        var info = ExifInfo()
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        else { return info }
+
+        var w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue
+        var h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
+        if let o = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue, (5...8).contains(o) {
+            swap(&w, &h)
+        }
+        info.pixelWidth = w
+        info.pixelHeight = h
+
+        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            info.iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber])?.first?.intValue
+            info.exposureTime = (exif[kCGImagePropertyExifExposureTime] as? NSNumber)?.doubleValue
+            info.fNumber = (exif[kCGImagePropertyExifFNumber] as? NSNumber)?.doubleValue
+            info.focalLength = (exif[kCGImagePropertyExifFocalLength] as? NSNumber)?.doubleValue
+            info.lensModel = exif[kCGImagePropertyExifLensModel] as? String
+            if let s = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
+                info.capturedAt = exifDate.date(from: s)
+            }
+        }
+        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            info.cameraMake = tiff[kCGImagePropertyTIFFMake] as? String
+            info.cameraModel = tiff[kCGImagePropertyTIFFModel] as? String
+            if info.capturedAt == nil, let s = tiff[kCGImagePropertyTIFFDateTime] as? String {
+                info.capturedAt = exifDate.date(from: s)
+            }
+        }
+        if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
+            if let lat = (gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue {
+                let ref = gps[kCGImagePropertyGPSLatitudeRef] as? String
+                info.latitude = (ref == "S") ? -lat : lat
+            }
+            if let lon = (gps[kCGImagePropertyGPSLongitude] as? NSNumber)?.doubleValue {
+                let ref = gps[kCGImagePropertyGPSLongitudeRef] as? String
+                info.longitude = (ref == "W") ? -lon : lon
+            }
+        }
+        return info
+    }
+}
+
 private final class FloatingButton: NSView {
 
     var action: () -> Void = {}

@@ -3,7 +3,8 @@ import PlateCore
 
 final class LibraryViewController: NSViewController,
                                    NSCollectionViewDataSource,
-                                   NSCollectionViewDelegate {
+                                   NSCollectionViewDelegate,
+                                   NSMenuItemValidation {
 
     enum ImportPhase {
         case scanning
@@ -15,6 +16,13 @@ final class LibraryViewController: NSViewController,
         case allPhotos
         case byMonth
         case byYear
+    }
+
+    /// Capture-date sort direction for the grid, flipped from the View ▸ Sort By
+    /// menu. Undated assets always sink to the bottom regardless of direction.
+    enum SortOrder {
+        case newestFirst
+        case oldestFirst
     }
 
     /// Where the grid pulls its assets from. Driven by the sidebar selection
@@ -46,9 +54,12 @@ final class LibraryViewController: NSViewController,
     }
 
     var library: PlateLibrary?
-    /// The currently visible photos, sorted newest-first. The detail viewer
+    /// The currently visible photos, ordered by `sortOrder`. The detail viewer
     /// uses this list for prev/next so it stays inside the current source.
     private(set) var assets: [Asset] = []
+    /// Capture-date sort direction. Persists across sidebar source switches;
+    /// resets only when the app relaunches (in-memory window state, like zoom).
+    private(set) var sortOrder: SortOrder = .newestFirst
     /// Display order — `.asset` slots in `.allPhotos`, `.aggregate` slots in
     /// `.byYear` / `.byMonth`.
     private var gridSlots: [GridSlot] = []
@@ -167,13 +178,7 @@ final class LibraryViewController: NSViewController,
             emptyLabel.isHidden = false
             return
         }
-        assets = loadAssets(from: lib).sorted { lhs, rhs in
-            switch (lhs.capturedAt, rhs.capturedAt) {
-            case let (l?, r?): return l > r
-            case (_, nil):     return true
-            case (nil, _):     return false
-            }
-        }
+        assets = sortedByCaptureDate(loadAssets(from: lib))
         gridSlots = Self.buildSlots(assets: assets, mode: displayMode)
         layout.itemSizes = gridSlots.map { slot in
             let a = slot.representative
@@ -216,6 +221,42 @@ final class LibraryViewController: NSViewController,
         guard displayMode != mode else { return }
         displayMode = mode
         reload()
+    }
+
+    /// Triggered by the View ▸ Sort By menu.
+    func setSortOrder(_ order: SortOrder) {
+        guard sortOrder != order else { return }
+        sortOrder = order
+        reload()
+    }
+
+    /// Order by capture date in the current `sortOrder` direction. Assets with
+    /// no `capturedAt` always sort to the bottom in both directions so unknown
+    /// dates never jump to the top when the user picks "Oldest First".
+    private func sortedByCaptureDate(_ input: [Asset]) -> [Asset] {
+        input.sorted { lhs, rhs in
+            switch (lhs.capturedAt, rhs.capturedAt) {
+            case let (l?, r?): return sortOrder == .newestFirst ? l > r : l < r
+            case (_?, nil):    return true
+            case (nil, _?):    return false
+            case (nil, nil):   return false
+            }
+        }
+    }
+
+    /// View ▸ Sort By ▸ Newest/Oldest First. Tag 0 = newest, 1 = oldest.
+    @objc func sortFromMenu(_ sender: NSMenuItem) {
+        setSortOrder(sender.tag == 0 ? .newestFirst : .oldestFirst)
+    }
+
+    /// Drives the checkmark next to the active Sort By item. Other menu items
+    /// resolved to this controller stay enabled (their prior default behavior).
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(sortFromMenu(_:)) {
+            let itemIsNewest = (menuItem.tag == 0)
+            menuItem.state = (sortOrder == .newestFirst) == itemIsNewest ? .on : .off
+        }
+        return true
     }
 
     /// Open the period represented by an aggregate card by switching to All
@@ -302,9 +343,9 @@ final class LibraryViewController: NSViewController,
         }
     }
 
-    /// Walk `assets` (which is already sorted newest-first), group by `key(date)`,
-    /// and emit one `.aggregate` per group with the first asset (newest in that
-    /// bucket) as the representative.
+    /// Walk `assets` (already sorted by the current `sortOrder`), group by
+    /// `key(date)`, and emit one `.aggregate` per group with the first asset
+    /// encountered in that bucket as the representative.
     private static func aggregate(assets: [Asset],
                                   key: (Date) -> String,
                                   title: (Date) -> String) -> [GridSlot]
@@ -886,6 +927,14 @@ private final class KeyboardAssetCollectionView: NSCollectionView {
         // 51 = Delete/Backspace, with ⌘ → trash selection
         if event.keyCode == 51, event.modifierFlags.contains(.command) {
             onDelete?()
+            return
+        }
+        // 53 = Escape → clear the current selection. Only consumed when
+        // something is selected, so an empty-selection Esc still falls through
+        // to its default (e.g. exit full screen).
+        if event.keyCode == 53, !selectionIndexPaths.isEmpty {
+            deselectItems(at: selectionIndexPaths)
+            anchorIndex = nil
             return
         }
         super.keyDown(with: event)

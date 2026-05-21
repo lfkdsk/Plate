@@ -54,6 +54,10 @@ final class SidebarViewController: NSViewController {
         if #available(macOS 11.0, *) {
             outlineView.style = .sourceList
         }
+        // Drag-to-reorder, scoped to the Albums section (see the DnD data-source
+        // methods below — only album rows are draggable / droppable).
+        outlineView.registerForDraggedTypes([.plateAlbumRow])
+        outlineView.setDraggingSourceOperationMask(.move, forLocal: true)
 
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
         col.isEditable = false
@@ -126,6 +130,105 @@ extension SidebarViewController: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         (item as? SidebarItem)?.children.isEmpty == false
     }
+
+    // MARK: Drag-to-reorder (Albums only)
+
+    /// Only album rows are draggable. The pasteboard carries the row's index
+    /// within `albumsHeader.children`.
+    func outlineView(_ outlineView: NSOutlineView,
+                     pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let sidebarItem = item as? SidebarItem,
+              let index = albumsHeader.children.firstIndex(where: { $0 === sidebarItem })
+        else { return nil }
+        let pb = NSPasteboardItem()
+        pb.setString(String(index), forType: .plateAlbumRow)
+        return pb
+    }
+
+    /// Accept drops only inside the Albums group. Drops landing on a row or on
+    /// the header are retargeted to a between-rows insertion so AppKit shows the
+    /// drop line in the right place.
+    func outlineView(_ outlineView: NSOutlineView,
+                     validateDrop info: NSDraggingInfo,
+                     proposedItem item: Any?,
+                     proposedChildIndex index: Int) -> NSDragOperation {
+        guard info.draggingPasteboard.availableType(from: [.plateAlbumRow]) != nil else { return [] }
+        if (item as? SidebarItem) === albumsHeader {
+            if index == -1 {
+                outlineView.setDropItem(albumsHeader, dropChildIndex: albumsHeader.children.count)
+            }
+            return .move
+        }
+        // Dropped directly on an album row → insert before that row.
+        if let target = item as? SidebarItem,
+           let row = albumsHeader.children.firstIndex(where: { $0 === target }) {
+            outlineView.setDropItem(albumsHeader, dropChildIndex: row)
+            return .move
+        }
+        return []
+    }
+
+    func outlineView(_ outlineView: NSOutlineView,
+                     acceptDrop info: NSDraggingInfo,
+                     item: Any?,
+                     childIndex index: Int) -> Bool {
+        guard let str = info.draggingPasteboard.string(forType: .plateAlbumRow),
+              let sourceIndex = Int(str),
+              sourceIndex >= 0, sourceIndex < albumsHeader.children.count
+        else { return false }
+
+        // CRITICAL: do NOT mutate the model / reloadItem synchronously here.
+        // Reloading inside performDragOperation frees the row views + items that
+        // AppKit is still messaging as it tears the drag down → EXC_BAD_ACCESS in
+        // -[NSOutlineView performDragOperation:]. Return true to let the drag
+        // finish, then reorder on the next runloop tick.
+        let proposedIndex = index
+        DispatchQueue.main.async { [weak self] in
+            self?.commitAlbumReorder(sourceIndex: sourceIndex, proposedIndex: proposedIndex)
+        }
+        return true
+    }
+
+    /// Apply a reorder after the drop has fully settled (see `acceptDrop`).
+    private func commitAlbumReorder(sourceIndex: Int, proposedIndex: Int) {
+        guard sourceIndex >= 0, sourceIndex < albumsHeader.children.count else { return }
+
+        // Preserve the current sidebar selection across the reload so a reorder
+        // doesn't yank the grid to a different source.
+        let selected = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem
+
+        var children = albumsHeader.children
+        let moved = children.remove(at: sourceIndex)
+        var dest = (proposedIndex == -1) ? children.count : proposedIndex
+        if sourceIndex < dest { dest -= 1 }          // account for the removal
+        dest = max(0, min(dest, children.count))
+        children.insert(moved, at: dest)
+        albumsHeader.children = children
+
+        if let lib = library {
+            let ids = children.compactMap { albumID(of: $0) }
+            do { try lib.reorderAlbums(orderedIDs: ids) }
+            catch { NSAlert(error: error).runModal() }
+        }
+
+        outlineView.reloadItem(albumsHeader, reloadChildren: true)
+        outlineView.expandItem(albumsHeader)
+        if let selected = selected {
+            let row = outlineView.row(forItem: selected)
+            if row >= 0 {
+                outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+        }
+    }
+
+    private func albumID(of item: SidebarItem) -> UUID? {
+        if case .album(let id, _)? = item.source { return id }
+        return nil
+    }
+}
+
+extension NSPasteboard.PasteboardType {
+    static let plateAlbumRow = NSPasteboard.PasteboardType("com.lfkdsk.plate.album-row")
 }
 
 // MARK: - Delegate

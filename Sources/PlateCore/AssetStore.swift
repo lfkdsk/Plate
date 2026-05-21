@@ -38,7 +38,8 @@ public final class AssetStore {
     /// v2 → adds `content_hash` (SHA-256) for import dedup
     /// v3 → adds `is_favorite` + `deleted_at` columns on assets, plus the
     ///      `albums` / `album_assets` tables for user-defined collections.
-    public static let currentSchemaVersion: Int32 = 3
+    /// v4 → adds `position` to `albums` for user-defined sidebar ordering.
+    public static let currentSchemaVersion: Int32 = 4
 
     public init(url: URL) throws {
         self.url = url
@@ -97,9 +98,11 @@ public final class AssetStore {
                 CREATE TABLE albums (
                     id         BLOB PRIMARY KEY NOT NULL,
                     name       TEXT NOT NULL,
-                    created_at REAL NOT NULL DEFAULT (julianday('now'))
+                    created_at REAL NOT NULL DEFAULT (julianday('now')),
+                    position   INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX idx_albums_name ON albums(name);
+                CREATE INDEX idx_albums_position ON albums(position);
 
                 CREATE TABLE album_assets (
                     album_id BLOB NOT NULL,
@@ -120,8 +123,12 @@ public final class AssetStore {
             // ALTER + PRAGMA user_version need to be visible to subsequent steps.
             try migrateV1toV2()
             try migrateV2toV3()
+            try migrateV3toV4()
         } else if existing == 2 {
             try migrateV2toV3()
+            try migrateV3toV4()
+        } else if existing == 3 {
+            try migrateV3toV4()
         } else if existing == Self.currentSchemaVersion {
             // Up to date.
         } else {
@@ -167,6 +174,23 @@ public final class AssetStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_album_assets_album ON album_assets(album_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_album_assets_asset ON album_assets(asset_id);")
         try exec("PRAGMA user_version = 3;")
+    }
+
+    private func migrateV3toV4() throws {
+        // v3 → v4: user-defined album order. Add `position` and seed it from the
+        // existing name order so the sidebar looks unchanged until the user drags
+        // a row. Each album gets a distinct position = number of albums sorting
+        // before it (ties broken by id), giving a stable 0..n-1 sequence.
+        try exec("ALTER TABLE albums ADD COLUMN position INTEGER NOT NULL DEFAULT 0;")
+        try exec("""
+            UPDATE albums SET position = (
+                SELECT COUNT(*) FROM albums b
+                WHERE b.name < albums.name
+                   OR (b.name = albums.name AND b.id < albums.id)
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_albums_position ON albums(position);")
+        try exec("PRAGMA user_version = 4;")
     }
 
     private func readUserVersion() -> Int32 {
@@ -469,7 +493,11 @@ public final class AssetStore {
         let id = UUID()
         try queue.sync {
             var stmt: OpaquePointer?
-            try prepare("INSERT INTO albums (id, name) VALUES (?, ?);", &stmt)
+            // New albums append to the bottom of the user's order (Photos behavior).
+            try prepare("""
+                INSERT INTO albums (id, name, position)
+                VALUES (?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM albums));
+                """, &stmt)
             defer { sqlite3_finalize(stmt) }
             try bindUUID(stmt, 1, id)
             try bindText(stmt, 2, name)
@@ -478,6 +506,34 @@ public final class AssetStore {
             }
         }
         return id
+    }
+
+    /// Persist a new album ordering. `orderedIDs` lists every album id in the
+    /// desired display order; each row's `position` is rewritten to its index.
+    /// Wrapped in a transaction so `listAlbums` never observes a half-applied
+    /// order.
+    public func setAlbumOrder(_ orderedIDs: [UUID]) throws {
+        try queue.sync {
+            try exec("BEGIN IMMEDIATE;")
+            do {
+                var stmt: OpaquePointer?
+                try prepare("UPDATE albums SET position = ? WHERE id = ?;", &stmt)
+                defer { sqlite3_finalize(stmt) }
+                for (index, id) in orderedIDs.enumerated() {
+                    sqlite3_reset(stmt)
+                    sqlite3_clear_bindings(stmt)
+                    sqlite3_bind_int64(stmt, 1, Int64(index))
+                    try bindUUID(stmt, 2, id)
+                    guard sqlite3_step(stmt) == SQLITE_DONE else {
+                        throw StoreError.step(lastError())
+                    }
+                }
+                try exec("COMMIT;")
+            } catch {
+                try? exec("ROLLBACK;")
+                throw error
+            }
+        }
     }
 
     /// Delete an album. The `ON DELETE CASCADE` on `album_assets` clears
@@ -520,7 +576,7 @@ public final class AssetStore {
                         JOIN assets s ON s.id = aa.asset_id
                         WHERE aa.album_id = a.id AND s.deleted_at IS NULL) AS asset_count
                 FROM albums a
-                ORDER BY a.name COLLATE NOCASE;
+                ORDER BY a.position ASC, a.name COLLATE NOCASE;
                 """, &stmt)
             defer { sqlite3_finalize(stmt) }
 

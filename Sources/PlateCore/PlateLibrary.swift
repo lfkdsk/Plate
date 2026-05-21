@@ -396,6 +396,12 @@ public final class PlateLibrary {
         try store.renameAlbum(id: id, to: newName)
     }
 
+    /// Persist a user-defined album order (sidebar drag-to-reorder). Pass every
+    /// album id in the desired top-to-bottom order.
+    public func reorderAlbums(orderedIDs: [UUID]) throws {
+        try store.setAlbumOrder(orderedIDs)
+    }
+
     public var albums: [(id: UUID, name: String, assetCount: Int)] {
         (try? store.listAlbums()) ?? []
     }

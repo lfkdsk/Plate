@@ -41,6 +41,25 @@ final class PlateLibraryTests: XCTestCase {
         XCTAssertThrowsError(try PlateLibrary.open(at: dir))
     }
 
+    func testAlbumReorderPersists() throws {
+        let libURL = tempRoot.appendingPathComponent("AlbumOrder.plate")
+        let lib = try PlateLibrary.create(at: libURL)
+
+        // New albums append in creation order (position 0, 1, 2).
+        let a = try lib.createAlbum(name: "Alpha")
+        let b = try lib.createAlbum(name: "Bravo")
+        let c = try lib.createAlbum(name: "Charlie")
+        XCTAssertEqual(lib.albums.map(\.name), ["Alpha", "Bravo", "Charlie"])
+
+        // Reorder to Charlie, Alpha, Bravo.
+        try lib.reorderAlbums(orderedIDs: [c, a, b])
+        XCTAssertEqual(lib.albums.map(\.name), ["Charlie", "Alpha", "Bravo"])
+
+        // Order survives a close + reopen (persisted, not just in-memory).
+        let reopened = try PlateLibrary.open(at: libURL)
+        XCTAssertEqual(reopened.albums.map(\.name), ["Charlie", "Alpha", "Bravo"])
+    }
+
     func testImportJPEGGeneratesThumbnailAndPersists() throws {
         let libURL = tempRoot.appendingPathComponent("ImportLib.plate")
         let lib = try PlateLibrary.create(at: libURL)
