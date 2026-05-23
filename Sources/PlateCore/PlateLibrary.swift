@@ -241,6 +241,19 @@ public final class PlateLibrary {
         return digest.reduce(into: "") { $0 += String(format: "%02x", $1) }
     }
 
+    /// SHA-256 hex of a file's bytes — the same digest used for import dedup.
+    /// Lets the import picker test a candidate against the library before copying.
+    public func contentHash(of url: URL) throws -> String {
+        try Self.sha256Hex(of: url)
+    }
+
+    /// Snapshot of every content hash already in the library. Combine with
+    /// `contentHash(of:)` for O(1) "already imported?" checks while scanning a
+    /// camera / SD card.
+    public func existingContentHashes() -> Set<String> {
+        (try? store.allContentHashes()) ?? []
+    }
+
     /// Resolve a stored relative path back to an absolute URL inside the bundle.
     public func absoluteURL(forRelative path: String) -> URL {
         url.appendingPathComponent(path)

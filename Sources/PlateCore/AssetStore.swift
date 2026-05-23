@@ -486,6 +486,24 @@ public final class AssetStore {
         }
     }
 
+    /// Every non-null content hash in the library, including soft-deleted rows
+    /// (so a trashed photo still reads as "already imported"). Used by the
+    /// import picker to pre-flag candidates without a per-file DB round trip.
+    public func allContentHashes() throws -> Set<String> {
+        try queue.sync {
+            var stmt: OpaquePointer?
+            try prepare("SELECT content_hash FROM assets WHERE content_hash IS NOT NULL;", &stmt)
+            defer { sqlite3_finalize(stmt) }
+            var hashes = Set<String>()
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = sqlite3_column_text(stmt, 0) {
+                    hashes.insert(String(cString: c))
+                }
+            }
+            return hashes
+        }
+    }
+
     // MARK: - Albums
 
     /// Create a new album and return its id.

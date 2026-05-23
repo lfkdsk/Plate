@@ -60,6 +60,28 @@ final class PlateLibraryTests: XCTestCase {
         XCTAssertEqual(reopened.albums.map(\.name), ["Charlie", "Alpha", "Bravo"])
     }
 
+    func testExistingContentHashesFlagsImported() throws {
+        let libURL = tempRoot.appendingPathComponent("Dedup.plate")
+        let lib = try PlateLibrary.create(at: libURL)
+
+        let card = tempRoot.appendingPathComponent("card")
+        try FileManager.default.createDirectory(at: card, withIntermediateDirectories: true)
+        let imgA = card.appendingPathComponent("A.JPG")
+        let imgB = card.appendingPathComponent("B.JPG")
+        try Self.writeTestJPEG(to: imgA, width: 64, height: 48)
+        try Self.writeTestJPEG(to: imgB, width: 80, height: 60)   // different bytes
+
+        // Import only A; B stays on the "card".
+        let result = try lib.importPairs([AssetPair(primary: imgA)], thumbnailPixel: 64)
+        XCTAssertEqual(result.imported.count, 1)
+
+        // The picker's pre-flag: A is already imported, B is new.
+        let existing = lib.existingContentHashes()
+        XCTAssertEqual(existing.count, 1)
+        XCTAssertTrue(existing.contains(try lib.contentHash(of: imgA)))
+        XCTAssertFalse(existing.contains(try lib.contentHash(of: imgB)))
+    }
+
     func testImportJPEGGeneratesThumbnailAndPersists() throws {
         let libURL = tempRoot.appendingPathComponent("ImportLib.plate")
         let lib = try PlateLibrary.create(at: libURL)

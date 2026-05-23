@@ -58,6 +58,11 @@ enum MainMenu {
         menu.addItem(.init(title: "Import…",
                            action: #selector(LibraryWindowController.importFromMenu(_:)),
                            keyEquivalent: "i"))
+        let importCard = NSMenuItem(title: "Import from Camera or Card…",
+                                    action: #selector(LibraryWindowController.importFromCardFromMenu(_:)),
+                                    keyEquivalent: "i")
+        importCard.keyEquivalentModifierMask = [.command, .shift]   // ⇧⌘I
+        menu.addItem(importCard)
         menu.addItem(.separator())
         // Re-derive thumbnails / EXIF / content hashes from the originals on
         // disk. Lives in File rather than View because it's a library-scoped

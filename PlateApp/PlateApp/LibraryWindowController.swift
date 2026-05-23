@@ -121,9 +121,21 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
             height: initialFrame.height
         )
         window.setFrame(centered, display: false)
+
+        // Photos-style auto-import: watch for camera / SD-card mounts.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(volumeDidMount(_:)),
+            name: NSWorkspace.didMountNotification,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
 
     // MARK: - Toolbar actions
 
@@ -299,6 +311,86 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         panel.beginSheetModal(for: window) { [weak self] result in
             guard result == .OK else { return }
             self?.libraryViewController?.importURLs(panel.urls)
+        }
+    }
+
+    // MARK: - Camera / SD-card import
+
+    /// A removable volume mounted. If it looks like a camera / SD card (has a
+    /// DCIM folder), scan it and offer the import picker. Plain disks / disk
+    /// images without DCIM are ignored so we don't nag on every mount.
+    @objc private func volumeDidMount(_ note: Notification) {
+        guard let url = (note.userInfo?["NSWorkspaceVolumeURLKey"] as? URL)
+            ?? (note.userInfo?["NSDevicePath"] as? String).map({ URL(fileURLWithPath: $0) })
+        else { return }
+        var isDir: ObjCBool = false
+        let dcim = url.appendingPathComponent("DCIM", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: dcim.path, isDirectory: &isDir), isDir.boolValue
+        else { return }
+        scanAndPresentPicker(root: url, sourceName: url.lastPathComponent, announceEmpty: false)
+    }
+
+    /// File ▸ Import from Camera or Card… — manual entry point (also handy for
+    /// importing from an ordinary folder).
+    @objc func importFromCardFromMenu(_ sender: Any?) {
+        guard let window = window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.title = "Import from Camera or Card"
+        panel.message = "Choose a camera, SD card, or folder to import from."
+        panel.prompt = "Choose"
+        panel.beginSheetModal(for: window) { [weak self] result in
+            guard result == .OK, let root = panel.url else { return }
+            self?.scanAndPresentPicker(root: root, sourceName: root.lastPathComponent, announceEmpty: true)
+        }
+    }
+
+    /// Scan `root` (its DCIM subfolder when present, else the whole tree) for
+    /// importable files off the main thread, pair them, and show the picker.
+    private func scanAndPresentPicker(root: URL, sourceName: String, announceEmpty: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let scanRoot: URL = {
+                var isDir: ObjCBool = false
+                let dcim = root.appendingPathComponent("DCIM", isDirectory: true)
+                if FileManager.default.fileExists(atPath: dcim.path, isDirectory: &isDir), isDir.boolValue {
+                    return dcim
+                }
+                return root
+            }()
+            let files = (try? LibraryScanner.scan(directory: scanRoot)) ?? []
+            let pairs = AssetPairer.pair(files: files)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard !pairs.isEmpty else {
+                    if announceEmpty { self.presentNoPhotosFound(sourceName: sourceName) }
+                    return
+                }
+                guard let lib = self.libraryDocument?.library,
+                      let presenter = self.window?.contentViewController else { return }
+                ImportPickerViewController.present(
+                    from: presenter,
+                    library: lib,
+                    pairs: pairs,
+                    sourceName: sourceName
+                ) { [weak self] in
+                    self?.libraryViewController?.reload()
+                }
+            }
+        }
+    }
+
+    private func presentNoPhotosFound(sourceName: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "No importable photos found"
+        alert.informativeText = "“\(sourceName)” doesn’t contain any recognized photo files."
+        alert.addButton(withTitle: "OK")
+        if let window = window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
         }
     }
 
