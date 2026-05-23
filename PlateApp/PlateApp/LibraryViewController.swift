@@ -440,6 +440,24 @@ final class LibraryViewController: NSViewController,
         addToItem.submenu = albumsMenu
         menu.addItem(addToItem)
 
+        // Export — copy the originals out of the library to a chosen folder.
+        menu.addItem(.separator())
+        let n = selectedAssets.count
+        let exportItem = NSMenuItem(title: n == 1 ? "Export Photo…" : "Export \(n) Photos…",
+                                    action: #selector(exportMastersFromMenu(_:)),
+                                    keyEquivalent: "")
+        exportItem.target = self
+        menu.addItem(exportItem)
+        // Only offer "with RAW" when there's actually a RAW/sidecar to bring along.
+        if selectedAssets.contains(where: { !$0.raws.isEmpty || !$0.sidecars.isEmpty }) {
+            let origItem = NSMenuItem(title: n == 1 ? "Export Original (with RAW)…"
+                                                    : "Export \(n) Originals (with RAW)…",
+                                      action: #selector(exportOriginalsFromMenu(_:)),
+                                      keyEquivalent: "")
+            origItem.target = self
+            menu.addItem(origItem)
+        }
+
         // Source-specific destructive actions.
         menu.addItem(.separator())
         switch source {
@@ -561,6 +579,74 @@ final class LibraryViewController: NSViewController,
 
     @objc private func moveToTrashFromMenu(_ sender: Any?) {
         deleteSelectedAssets()
+    }
+
+    @objc private func exportMastersFromMenu(_ sender: Any?) {
+        exportSelected(includeRaws: false, includeSidecars: false)
+    }
+
+    @objc private func exportOriginalsFromMenu(_ sender: Any?) {
+        exportSelected(includeRaws: true, includeSidecars: true)
+    }
+
+    /// Ask for a destination folder, then copy the selected assets' files there
+    /// off the main thread. Masters always; RAW + sidecars when requested.
+    private func exportSelected(includeRaws: Bool, includeSidecars: Bool) {
+        guard let lib = library, let window = view.window else { return }
+        let selected = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
+            .map { $0.item }.sorted())
+        guard !selected.isEmpty else { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Export"
+        panel.message = "Choose a destination folder for \(selected.count) photo\(selected.count == 1 ? "" : "s")."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let dest = panel.url, let self = self else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = try? lib.exportAssets(selected, to: dest,
+                                                   includeRaws: includeRaws,
+                                                   includeSidecars: includeSidecars)
+                DispatchQueue.main.async {
+                    self.presentExportSummary(result, destination: dest, requested: selected.count)
+                }
+            }
+        }
+    }
+
+    private func presentExportSummary(_ result: PlateLibrary.ExportResult?,
+                                      destination: URL,
+                                      requested: Int) {
+        let exported = result?.exported ?? 0
+        let failed = result?.failures.count ?? requested
+        let alert = NSAlert()
+        if failed == 0 {
+            alert.alertStyle = .informational
+            alert.messageText = "Exported \(exported) photo\(exported == 1 ? "" : "s")"
+            alert.informativeText = destination.path
+            alert.addButton(withTitle: "Reveal in Finder")
+            alert.addButton(withTitle: "Done")
+        } else {
+            alert.alertStyle = .warning
+            alert.messageText = "Exported \(exported), \(failed) failed"
+            alert.informativeText = (result?.failures.prefix(5).map {
+                "  • " + ($0.asset.primary as NSString).lastPathComponent
+            }.joined(separator: "\n")) ?? "The destination may not be writable."
+            alert.addButton(withTitle: "OK")
+        }
+        let reveal: (NSApplication.ModalResponse) -> Void = { response in
+            if failed == 0, response == .alertFirstButtonReturn {
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            }
+        }
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: reveal)
+        } else {
+            reveal(alert.runModal())
+        }
     }
 
     @objc private func restoreFromMenu(_ sender: Any?) {

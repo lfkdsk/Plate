@@ -82,6 +82,31 @@ final class PlateLibraryTests: XCTestCase {
         XCTAssertFalse(existing.contains(try lib.contentHash(of: imgB)))
     }
 
+    func testExportCopiesMasterAndAvoidsCollision() throws {
+        let libURL = tempRoot.appendingPathComponent("Export.plate")
+        let lib = try PlateLibrary.create(at: libURL)
+        let srcDir = tempRoot.appendingPathComponent("esrc")
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        let jpeg = srcDir.appendingPathComponent("IMG_1.JPG")
+        try Self.writeTestJPEG(to: jpeg, width: 100, height: 80)
+        let asset = try lib.importPairs([AssetPair(primary: jpeg)], thumbnailPixel: 64).imported[0]
+
+        let dest = tempRoot.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        let r1 = try lib.exportAssets([asset], to: dest)
+        XCTAssertEqual(r1.exported, 1)
+        XCTAssertTrue(r1.failures.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("IMG_1.JPG").path))
+
+        // Re-exporting the same asset must not overwrite — it makes a second copy.
+        let r2 = try lib.exportAssets([asset], to: dest)
+        XCTAssertEqual(r2.exported, 1)
+        let jpegs = try FileManager.default.contentsOfDirectory(atPath: dest.path)
+            .filter { $0.lowercased().hasSuffix(".jpg") }
+        XCTAssertEqual(jpegs.count, 2)
+    }
+
     func testImportJPEGGeneratesThumbnailAndPersists() throws {
         let libURL = tempRoot.appendingPathComponent("ImportLib.plate")
         let lib = try PlateLibrary.create(at: libURL)

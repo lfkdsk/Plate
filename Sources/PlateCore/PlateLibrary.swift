@@ -254,6 +254,52 @@ public final class PlateLibrary {
         (try? store.allContentHashes()) ?? []
     }
 
+    public struct ExportResult {
+        public var exported: Int
+        public var failures: [(asset: Asset, error: Error)]
+    }
+
+    /// Copy assets' files out of the library into `destination`. The display
+    /// master always goes; `includeRaws` / `includeSidecars` add the RAW
+    /// companions and XMP/AAE sidecars. Companions keep the (possibly
+    /// collision-renamed) master's basename so the exported group re-pairs
+    /// cleanly on a future import. Existing files in `destination` are never
+    /// overwritten — colliding names get a numeric suffix. Per-asset failures
+    /// are accumulated, not thrown, so one unreadable file doesn't abort the set.
+    @discardableResult
+    public func exportAssets(_ assets: [Asset],
+                             to destination: URL,
+                             includeRaws: Bool = true,
+                             includeSidecars: Bool = true) throws -> ExportResult {
+        var exported = 0
+        var failures: [(Asset, Error)] = []
+        for asset in assets {
+            do {
+                let masterDest = try copyAvoidingCollision(
+                    absoluteURL(forRelative: asset.primary), into: destination)
+                let base = masterDest.deletingPathExtension().lastPathComponent
+                if includeRaws {
+                    for raw in asset.raws {
+                        let src = absoluteURL(forRelative: raw)
+                        let target = destination.appendingPathComponent("\(base).\(src.pathExtension)")
+                        try Self.copyOverwriting(src, to: target)
+                    }
+                }
+                if includeSidecars {
+                    for side in asset.sidecars {
+                        let src = absoluteURL(forRelative: side)
+                        let target = destination.appendingPathComponent("\(base).\(src.pathExtension)")
+                        try Self.copyOverwriting(src, to: target)
+                    }
+                }
+                exported += 1
+            } catch {
+                failures.append((asset, error))
+            }
+        }
+        return ExportResult(exported: exported, failures: failures)
+    }
+
     /// Resolve a stored relative path back to an absolute URL inside the bundle.
     public func absoluteURL(forRelative path: String) -> URL {
         url.appendingPathComponent(path)
