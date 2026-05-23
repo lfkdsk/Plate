@@ -47,6 +47,7 @@ jobs:
             -project PlateApp.xcodeproj \
             -scheme PlateApp \
             -configuration Debug \
+            -derivedDataPath build \
             -destination 'platform=macOS' \
             build \
             CODE_SIGN_IDENTITY="-" \
@@ -55,6 +56,20 @@ jobs:
             | xcbeautify
         env:
           NSUnbufferedIO: YES
+
+      # Upload the built .app on every run — including pull requests, which the
+      # Release job skips. ditto (not plain zip) preserves the bundle's
+      # extended attributes so it still launches after download.
+      - name: Zip Plate.app
+        working-directory: PlateApp/build/Build/Products/Debug
+        run: ditto -c -k --keepParent Plate.app Plate.zip
+
+      - name: Upload Debug .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Plate-Debug-${{ github.sha }}
+          path: PlateApp/build/Build/Products/Debug/Plate.zip
+          retention-days: 30
 
   # Release build produces the actual .app and uploads it as a workflow
   # artifact. On tag pushes (v*), the .app is also attached to a GitHub
