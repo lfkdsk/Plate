@@ -39,7 +39,10 @@ public final class AssetStore {
     /// v3 → adds `is_favorite` + `deleted_at` columns on assets, plus the
     ///      `albums` / `album_assets` tables for user-defined collections.
     /// v4 → adds `position` to `albums` for user-defined sidebar ordering.
-    public static let currentSchemaVersion: Int32 = 4
+    /// v5 → adds EXIF shooting-metadata columns (camera_make/model, lens_model,
+    ///      focal_length, aperture, shutter_speed, iso, latitude, longitude)
+    ///      that power the Statistics view. Backfilled by "Rebuild Library Data".
+    public static let currentSchemaVersion: Int32 = 5
 
     public init(url: URL) throws {
         self.url = url
@@ -88,6 +91,15 @@ public final class AssetStore {
                     content_hash  TEXT,
                     is_favorite   INTEGER NOT NULL DEFAULT 0,
                     deleted_at    REAL,
+                    camera_make   TEXT,
+                    camera_model  TEXT,
+                    lens_model    TEXT,
+                    focal_length  REAL,
+                    aperture      REAL,
+                    shutter_speed REAL,
+                    iso           INTEGER,
+                    latitude      REAL,
+                    longitude     REAL,
                     created_at    REAL NOT NULL DEFAULT (julianday('now'))
                 );
                 CREATE INDEX idx_assets_captured     ON assets(captured_at DESC);
@@ -124,11 +136,16 @@ public final class AssetStore {
             try migrateV1toV2()
             try migrateV2toV3()
             try migrateV3toV4()
+            try migrateV4toV5()
         } else if existing == 2 {
             try migrateV2toV3()
             try migrateV3toV4()
+            try migrateV4toV5()
         } else if existing == 3 {
             try migrateV3toV4()
+            try migrateV4toV5()
+        } else if existing == 4 {
+            try migrateV4toV5()
         } else if existing == Self.currentSchemaVersion {
             // Up to date.
         } else {
@@ -191,6 +208,23 @@ public final class AssetStore {
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_albums_position ON albums(position);")
         try exec("PRAGMA user_version = 4;")
+    }
+
+    private func migrateV4toV5() throws {
+        // v4 → v5: EXIF shooting-metadata columns. Existing rows get NULLs until
+        // the user runs "Rebuild Library Data", which re-extracts EXIF from the
+        // originals on disk. One ADD COLUMN per statement — older SQLite shipped
+        // with macOS rejects multiple ADD COLUMN clauses in a single ALTER.
+        try exec("ALTER TABLE assets ADD COLUMN camera_make   TEXT;")
+        try exec("ALTER TABLE assets ADD COLUMN camera_model  TEXT;")
+        try exec("ALTER TABLE assets ADD COLUMN lens_model    TEXT;")
+        try exec("ALTER TABLE assets ADD COLUMN focal_length  REAL;")
+        try exec("ALTER TABLE assets ADD COLUMN aperture      REAL;")
+        try exec("ALTER TABLE assets ADD COLUMN shutter_speed REAL;")
+        try exec("ALTER TABLE assets ADD COLUMN iso           INTEGER;")
+        try exec("ALTER TABLE assets ADD COLUMN latitude      REAL;")
+        try exec("ALTER TABLE assets ADD COLUMN longitude     REAL;")
+        try exec("PRAGMA user_version = 5;")
     }
 
     private func readUserVersion() -> Int32 {
@@ -336,7 +370,16 @@ public final class AssetStore {
                                     pixelWidth: Int?,
                                     pixelHeight: Int?,
                                     thumbnail: String?,
-                                    contentHash: String?) throws {
+                                    contentHash: String?,
+                                    cameraMake: String?,
+                                    cameraModel: String?,
+                                    lensModel: String?,
+                                    focalLength: Double?,
+                                    aperture: Double?,
+                                    shutterSpeed: Double?,
+                                    iso: Int?,
+                                    latitude: Double?,
+                                    longitude: Double?) throws {
         try queue.sync {
             var stmt: OpaquePointer?
             try prepare("""
@@ -345,7 +388,16 @@ public final class AssetStore {
                        pixel_width = ?,
                        pixel_height = ?,
                        thumbnail = ?,
-                       content_hash = ?
+                       content_hash = ?,
+                       camera_make = ?,
+                       camera_model = ?,
+                       lens_model = ?,
+                       focal_length = ?,
+                       aperture = ?,
+                       shutter_speed = ?,
+                       iso = ?,
+                       latitude = ?,
+                       longitude = ?
                  WHERE id = ?;
                 """, &stmt)
             defer { sqlite3_finalize(stmt) }
@@ -366,7 +418,16 @@ public final class AssetStore {
             } else {
                 try check(sqlite3_bind_null(stmt, 5))
             }
-            try bindUUID(stmt, 6, id)
+            try bindOptionalText(stmt, 6, cameraMake)
+            try bindOptionalText(stmt, 7, cameraModel)
+            try bindOptionalText(stmt, 8, lensModel)
+            try bindOptionalDouble(stmt, 9, focalLength)
+            try bindOptionalDouble(stmt, 10, aperture)
+            try bindOptionalDouble(stmt, 11, shutterSpeed)
+            try bindOptionalInt(stmt, 12, iso)
+            try bindOptionalDouble(stmt, 13, latitude)
+            try bindOptionalDouble(stmt, 14, longitude)
+            try bindUUID(stmt, 15, id)
             guard sqlite3_step(stmt) == SQLITE_DONE else {
                 throw StoreError.step(lastError())
             }
@@ -423,6 +484,88 @@ public final class AssetStore {
                 results.append(try readAsset(from: stmt))
             }
             return results
+        }
+    }
+
+    /// Non-deleted assets matching a compiled SmartFilter predicate, newest
+    /// capture first. The user predicate is ANDed with `deleted_at IS NULL` so
+    /// trashed rows never leak into a filtered grid. An empty predicate degrades
+    /// to the same query as `allAssetsCapturedDesc()`. All values arrive as
+    /// bound parameters — the SQL text itself contains no user input.
+    public func assets(matching compiled: SmartFilter.Compiled) throws -> [Asset] {
+        try queue.sync {
+            let whereClause = compiled.isEmpty
+                ? "deleted_at IS NULL"
+                : "deleted_at IS NULL AND \(compiled.whereSQL)"
+            var stmt: OpaquePointer?
+            try prepare("""
+                \(Self.assetSelectColumns)
+                FROM assets
+                WHERE \(whereClause)
+                ORDER BY (captured_at IS NULL), captured_at DESC, primary_path;
+                """, &stmt)
+            defer { sqlite3_finalize(stmt) }
+
+            // Bind in left-to-right ? order (1-based).
+            var index: Int32 = 1
+            for binding in compiled.bindings {
+                switch binding {
+                case .text(let s):   try bindText(stmt, index, s)
+                case .int(let i):    try check(sqlite3_bind_int64(stmt, index, i))
+                case .double(let d): try check(sqlite3_bind_double(stmt, index, d))
+                }
+                index += 1
+            }
+
+            var results: [Asset] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                results.append(try readAsset(from: stmt))
+            }
+            return results
+        }
+    }
+
+    /// Distinct non-null values of a text column among non-deleted assets,
+    /// alphabetised (NOCASE). Used to populate filter dropdowns (cameras,
+    /// lenses). `column` is a fixed allow-listed identifier — never user input.
+    public func distinctTextValues(column: String) throws -> [String] {
+        let allowed = ["camera_model", "camera_make", "lens_model"]
+        guard allowed.contains(column) else { return [] }
+        return try queue.sync {
+            var stmt: OpaquePointer?
+            try prepare("""
+                SELECT DISTINCT \(column) FROM assets
+                WHERE \(column) IS NOT NULL AND \(column) <> '' AND deleted_at IS NULL
+                ORDER BY \(column) COLLATE NOCASE;
+                """, &stmt)
+            defer { sqlite3_finalize(stmt) }
+            var values: [String] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = sqlite3_column_text(stmt, 0) { values.append(String(cString: c)) }
+            }
+            return values
+        }
+    }
+
+    /// Distinct capture years (Gregorian, local time) among non-deleted assets,
+    /// most recent first. Used to populate the year filter.
+    public func distinctCaptureYears() throws -> [Int] {
+        try queue.sync {
+            var stmt: OpaquePointer?
+            // strftime needs a datetime; captured_at is epoch seconds → 'unixepoch'
+            // with 'localtime' so the year matches the user's wall-clock.
+            try prepare("""
+                SELECT DISTINCT CAST(strftime('%Y', captured_at, 'unixepoch', 'localtime') AS INTEGER) AS y
+                FROM assets
+                WHERE captured_at IS NOT NULL AND deleted_at IS NULL
+                ORDER BY y DESC;
+                """, &stmt)
+            defer { sqlite3_finalize(stmt) }
+            var years: [Int] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                years.append(Int(sqlite3_column_int(stmt, 0)))
+            }
+            return years
         }
     }
 
@@ -669,14 +812,15 @@ public final class AssetStore {
     public func assetsInAlbumCapturedDesc(id albumID: UUID) throws -> [Asset] {
         try queue.sync {
             var stmt: OpaquePointer?
+            // Reuse the shared SELECT list (unqualified column names resolve to
+            // `assets` — `album_assets` shares none of them) so column indices
+            // stay in lockstep with readAsset across the EXIF schema additions.
             try prepare("""
-                SELECT s.id, s.primary_path, s.raws_json, s.sidecars_json,
-                       s.captured_at, s.pixel_width, s.pixel_height, s.thumbnail,
-                       s.content_hash, s.is_favorite, s.deleted_at
-                FROM assets s
-                JOIN album_assets aa ON aa.asset_id = s.id
-                WHERE aa.album_id = ? AND s.deleted_at IS NULL
-                ORDER BY (s.captured_at IS NULL), s.captured_at DESC, s.primary_path;
+                \(Self.assetSelectColumns)
+                FROM assets
+                JOIN album_assets aa ON aa.asset_id = assets.id
+                WHERE aa.album_id = ? AND assets.deleted_at IS NULL
+                ORDER BY (assets.captured_at IS NULL), assets.captured_at DESC, assets.primary_path;
                 """, &stmt)
             defer { sqlite3_finalize(stmt) }
             try bindUUID(stmt, 1, albumID)
@@ -696,7 +840,9 @@ public final class AssetStore {
     private static let assetSelectColumns = """
         SELECT id, primary_path, raws_json, sidecars_json,
                captured_at, pixel_width, pixel_height, thumbnail,
-               content_hash, is_favorite, deleted_at
+               content_hash, is_favorite, deleted_at,
+               camera_make, camera_model, lens_model, focal_length,
+               aperture, shutter_speed, iso, latitude, longitude
         """
 
     private func insertLocked(_ asset: Asset) throws {
@@ -704,8 +850,10 @@ public final class AssetStore {
         try prepare("""
             INSERT INTO assets (id, primary_path, raws_json, sidecars_json,
                                 captured_at, pixel_width, pixel_height, thumbnail,
-                                content_hash, is_favorite, deleted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                                content_hash, is_favorite, deleted_at,
+                                camera_make, camera_model, lens_model, focal_length,
+                                aperture, shutter_speed, iso, latitude, longitude)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, &stmt)
         defer { sqlite3_finalize(stmt) }
 
@@ -736,6 +884,15 @@ public final class AssetStore {
         } else {
             try check(sqlite3_bind_null(stmt, 11))
         }
+        try bindOptionalText(stmt, 12, asset.cameraMake)
+        try bindOptionalText(stmt, 13, asset.cameraModel)
+        try bindOptionalText(stmt, 14, asset.lensModel)
+        try bindOptionalDouble(stmt, 15, asset.focalLength)
+        try bindOptionalDouble(stmt, 16, asset.aperture)
+        try bindOptionalDouble(stmt, 17, asset.shutterSpeed)
+        try bindOptionalInt(stmt, 18, asset.iso)
+        try bindOptionalDouble(stmt, 19, asset.latitude)
+        try bindOptionalDouble(stmt, 20, asset.longitude)
 
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
@@ -779,6 +936,16 @@ public final class AssetStore {
             ? nil
             : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 10))
 
+        let cameraMake   = columnText(stmt, 11)
+        let cameraModel  = columnText(stmt, 12)
+        let lensModel    = columnText(stmt, 13)
+        let focalLength  = columnDouble(stmt, 14)
+        let aperture     = columnDouble(stmt, 15)
+        let shutterSpeed = columnDouble(stmt, 16)
+        let iso: Int?    = (sqlite3_column_type(stmt, 17) == SQLITE_NULL) ? nil : Int(sqlite3_column_int64(stmt, 17))
+        let latitude     = columnDouble(stmt, 18)
+        let longitude    = columnDouble(stmt, 19)
+
         return Asset(id: id,
                      primary: primary,
                      raws: raws,
@@ -789,7 +956,26 @@ public final class AssetStore {
                      thumbnail: thumbnail,
                      contentHash: contentHash,
                      isFavorite: isFavorite,
-                     deletedAt: deletedAt)
+                     deletedAt: deletedAt,
+                     cameraMake: cameraMake,
+                     cameraModel: cameraModel,
+                     lensModel: lensModel,
+                     focalLength: focalLength,
+                     aperture: aperture,
+                     shutterSpeed: shutterSpeed,
+                     iso: iso,
+                     latitude: latitude,
+                     longitude: longitude)
+    }
+
+    private func columnText(_ stmt: OpaquePointer?, _ index: Int32) -> String? {
+        guard sqlite3_column_type(stmt, index) != SQLITE_NULL,
+              let c = sqlite3_column_text(stmt, index) else { return nil }
+        return String(cString: c)
+    }
+
+    private func columnDouble(_ stmt: OpaquePointer?, _ index: Int32) -> Double? {
+        sqlite3_column_type(stmt, index) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, index)
     }
 
     // MARK: - Low-level helpers
@@ -827,6 +1013,22 @@ public final class AssetStore {
     private func bindOptionalInt(_ stmt: OpaquePointer?, _ index: Int32, _ value: Int?) throws {
         if let v = value {
             try check(sqlite3_bind_int64(stmt, index, Int64(v)))
+        } else {
+            try check(sqlite3_bind_null(stmt, index))
+        }
+    }
+
+    private func bindOptionalDouble(_ stmt: OpaquePointer?, _ index: Int32, _ value: Double?) throws {
+        if let v = value {
+            try check(sqlite3_bind_double(stmt, index, v))
+        } else {
+            try check(sqlite3_bind_null(stmt, index))
+        }
+    }
+
+    private func bindOptionalText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) throws {
+        if let v = value {
+            try bindText(stmt, index, v)
         } else {
             try check(sqlite3_bind_null(stmt, index))
         }

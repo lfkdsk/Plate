@@ -77,6 +77,9 @@ final class LibraryViewController: NSViewController,
     /// Fires when the display mode changes programmatically (drill-down) so the
     /// segmented control can update its selectedSegment to match.
     var onDisplayModeChanged: ((DisplayMode) -> Void)?
+    /// Fires when the smart filter changes so the toolbar can reflect whether a
+    /// filter is currently active (e.g. tint / fill the filter button).
+    var onFilterChanged: ((SmartFilter) -> Void)?
 
     private let scrollView = NSScrollView()
     private let collectionView = KeyboardAssetCollectionView()
@@ -203,17 +206,35 @@ final class LibraryViewController: NSViewController,
     /// Each branch hits the matching PlateCore query — soft-deleted rows are
     /// excluded by default in `lib.assets`, so Recently Deleted is the only
     /// view that surfaces them.
+    ///
+    /// An active smart filter is composed *on top of* the source: we intersect
+    /// the source's assets with the filter's matches by id. This keeps the
+    /// filter meaningful inside Favorites / a specific Album, not just the whole
+    /// Library. Recently Deleted is exempt — the EXIF filter query excludes
+    /// trashed rows, so intersecting would always empty it.
     private func loadAssets(from lib: PlateLibrary) -> [Asset] {
+        let base: [Asset]
         switch source {
-        case .library:
-            return lib.assets
-        case .favorites:
-            return lib.favoriteAssets
-        case .recentlyDeleted:
-            return lib.recentlyDeletedAssets
-        case .album(let id, _):
-            return lib.assetsInAlbum(id: id)
+        case .library:         base = lib.assets
+        case .favorites:       base = lib.favoriteAssets
+        case .recentlyDeleted: base = lib.recentlyDeletedAssets
+        case .album(let id, _): base = lib.assetsInAlbum(id: id)
         }
+        guard !smartFilter.isEmpty, source != .recentlyDeleted else { return base }
+        let matchedIDs = Set(lib.assets(matching: smartFilter).map(\.id))
+        return base.filter { matchedIDs.contains($0.id) }
+    }
+
+    /// Active EXIF smart filter. Empty ⇒ no filtering. Set by the toolbar's
+    /// filter popover; applied in `loadAssets(from:)`.
+    private(set) var smartFilter = SmartFilter()
+
+    /// Replace the active filter and refresh the grid. Fires `onFilterChanged`
+    /// so the toolbar can reflect active/inactive state.
+    func setSmartFilter(_ filter: SmartFilter) {
+        smartFilter = filter
+        onFilterChanged?(filter)
+        reload()
     }
 
     /// Triggered by the toolbar segmented control.
@@ -252,12 +273,40 @@ final class LibraryViewController: NSViewController,
     /// Drives the checkmark next to the active Sort By item. Other menu items
     /// resolved to this controller stay enabled (their prior default behavior).
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(sortFromMenu(_:)) {
+        switch menuItem.action {
+        case #selector(sortFromMenu(_:)):
             let itemIsNewest = (menuItem.tag == 0)
             menuItem.state = (sortOrder == .newestFirst) == itemIsNewest ? .on : .off
+            return true
+        case #selector(exportMastersFromMenu(_:)):
+            // File ▸ Export Photos… — needs at least one selected photo.
+            return !currentSelectedAssets().isEmpty
+        case #selector(exportOriginalsFromMenu(_:)):
+            // File ▸ Export Originals (with RAW)… — only when the selection
+            // actually carries a RAW or sidecar to bring along.
+            return currentSelectedAssets().contains { !$0.raws.isEmpty || !$0.sidecars.isEmpty }
+        case Selector(("undo:")):
+            // Mirror the manager's state into the Edit ▸ Undo item ("Undo
+            // Favorite", etc.). When a text field is editing, its field editor
+            // sits earlier in the responder chain and handles undo: instead.
+            let mgr = libraryUndoManager
+            menuItem.title = mgr?.undoMenuItemTitle ?? "Undo"
+            return mgr?.canUndo ?? false
+        case Selector(("redo:")):
+            let mgr = libraryUndoManager
+            menuItem.title = mgr?.redoMenuItemTitle ?? "Redo"
+            return mgr?.canRedo ?? false
+        default:
+            return true
         }
-        return true
     }
+
+    /// Edit ▸ Undo / ⌘Z. Explicit handler keeps undo deterministic regardless
+    /// of AppKit's implicit window-undo plumbing; the VC is in the responder
+    /// chain after the grid, so it catches undo: whenever no text editor does.
+    @objc func undo(_ sender: Any?) { libraryUndoManager?.undo() }
+    /// Edit ▸ Redo / ⇧⌘Z.
+    @objc func redo(_ sender: Any?) { libraryUndoManager?.redo() }
 
     /// Open the period represented by an aggregate card by switching to All
     /// Photos and scrolling to the first asset in that year (and month, if the
@@ -502,47 +551,98 @@ final class LibraryViewController: NSViewController,
         onEnterDetail?(flat)
     }
 
-    @objc private func toggleFavoriteFromMenu(_ sender: Any?) {
-        guard let lib = library else { return }
-        let selected = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
-            .map { $0.item }.sorted())
-        let allFav = selected.allSatisfy { $0.isFavorite }
-        let target = !allFav
+    // MARK: - Undo-able edits
+
+    /// The window's undo manager (vended by LibraryWindowController). Reversible
+    /// library edits register their inverse here so Edit ▸ Undo / Redo
+    /// (⌘Z / ⇧⌘Z) can roll them back.
+    private var libraryUndoManager: UndoManager? { view.window?.undoManager }
+
+    /// Apply per-asset favorite states and register the inverse. `newStates` and
+    /// `oldStates` run parallel to `assets`; undo re-invokes with them swapped,
+    /// so redo registers itself through the same code path. The handler captures
+    /// only value types + the target param — no retain cycle with self.
+    private func applyFavorite(assets: [Asset], newStates: [Bool], oldStates: [Bool], actionName: String) {
+        guard let lib = library,
+              assets.count == newStates.count, assets.count == oldStates.count else { return }
         do {
-            for asset in selected {
-                try lib.setFavorite(asset, isFavorite: target)
+            for (asset, state) in zip(assets, newStates) {
+                try lib.setFavorite(asset, isFavorite: state)
             }
         } catch {
             NSAlert(error: error).runModal()
+            return
         }
+        libraryUndoManager?.registerUndo(withTarget: self) { vc in
+            vc.applyFavorite(assets: assets, newStates: oldStates, oldStates: newStates, actionName: actionName)
+        }
+        libraryUndoManager?.setActionName(actionName)
         reload()
+    }
+
+    /// Add or remove album membership and register the inverse (add ⇄ remove).
+    private func applyAlbumMembership(assets: [Asset], albumID: UUID, add: Bool, actionName: String) {
+        guard let lib = library, !assets.isEmpty else { return }
+        do {
+            if add { try lib.addAssets(assets, toAlbum: albumID) }
+            else   { try lib.removeAssets(assets, fromAlbum: albumID) }
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        libraryUndoManager?.registerUndo(withTarget: self) { vc in
+            vc.applyAlbumMembership(assets: assets, albumID: albumID, add: !add, actionName: actionName)
+        }
+        libraryUndoManager?.setActionName(actionName)
+        onAlbumsChanged?()
+        reload()
+    }
+
+    /// Soft-delete (trash) or restore and register the inverse (trash ⇄ restore).
+    /// Both directions are quick DB updates, so they run synchronously on the
+    /// main thread — undo handlers must touch the UI on main anyway.
+    private func applyTrash(assets: [Asset], trash: Bool, actionName: String) {
+        guard let lib = library, !assets.isEmpty else { return }
+        do {
+            if trash { try lib.deleteAssets(assets) }
+            else     { try lib.restoreAssets(assets) }
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        libraryUndoManager?.registerUndo(withTarget: self) { vc in
+            vc.applyTrash(assets: assets, trash: !trash, actionName: actionName)
+        }
+        libraryUndoManager?.setActionName(actionName)
+        reload()
+    }
+
+    @objc private func toggleFavoriteFromMenu(_ sender: Any?) {
+        let selected = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
+            .map { $0.item }.sorted())
+        guard !selected.isEmpty else { return }
+        let allFav = selected.allSatisfy { $0.isFavorite }
+        let target = !allFav
+        applyFavorite(assets: selected,
+                      newStates: selected.map { _ in target },
+                      oldStates: selected.map { $0.isFavorite },
+                      actionName: target ? "Favorite" : "Remove from Favorites")
     }
 
     @objc private func addToAlbumFromMenu(_ sender: Any?) {
-        guard let lib = library,
-              let menuItem = sender as? NSMenuItem,
+        guard let menuItem = sender as? NSMenuItem,
               let albumID = menuItem.representedObject as? UUID else { return }
         let selected = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
             .map { $0.item }.sorted())
-        do {
-            try lib.addAssets(selected, toAlbum: albumID)
-        } catch {
-            NSAlert(error: error).runModal()
-        }
+        applyAlbumMembership(assets: selected, albumID: albumID, add: true, actionName: "Add to Album")
     }
 
     @objc private func removeFromAlbumFromMenu(_ sender: Any?) {
-        guard let lib = library,
-              let menuItem = sender as? NSMenuItem,
+        guard let menuItem = sender as? NSMenuItem,
               let albumID = menuItem.representedObject as? UUID else { return }
         let selected = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
             .map { $0.item }.sorted())
-        do {
-            try lib.removeAssets(selected, fromAlbum: albumID)
-        } catch {
-            NSAlert(error: error).runModal()
-        }
-        reload()
+        applyAlbumMembership(assets: selected, albumID: albumID, add: false, actionName: "Remove from Album")
     }
 
     @objc func newAlbumFromMenu(_ sender: Any?) {
@@ -581,12 +681,19 @@ final class LibraryViewController: NSViewController,
         deleteSelectedAssets()
     }
 
-    @objc private func exportMastersFromMenu(_ sender: Any?) {
+    @objc func exportMastersFromMenu(_ sender: Any?) {
         exportSelected(includeRaws: false, includeSidecars: false)
     }
 
-    @objc private func exportOriginalsFromMenu(_ sender: Any?) {
+    @objc func exportOriginalsFromMenu(_ sender: Any?) {
         exportSelected(includeRaws: true, includeSidecars: true)
+    }
+
+    /// Assets backing the current grid selection (aggregate cards excluded).
+    /// Shared by the export actions and their menu-bar validation.
+    private func currentSelectedAssets() -> [Asset] {
+        deletableAssets(forGridIndices: collectionView.selectionIndexPaths
+            .map { $0.item }.sorted())
     }
 
     /// Ask for a destination folder, then copy the selected assets' files there
@@ -650,15 +757,9 @@ final class LibraryViewController: NSViewController,
     }
 
     @objc private func restoreFromMenu(_ sender: Any?) {
-        guard let lib = library else { return }
         let selected = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
             .map { $0.item }.sorted())
-        do {
-            try lib.restoreAssets(selected)
-        } catch {
-            NSAlert(error: error).runModal()
-        }
-        reload()
+        applyTrash(assets: selected, trash: false, actionName: "Restore")
     }
 
     @objc private func permanentlyDeleteFromMenu(_ sender: Any?) {
@@ -698,7 +799,7 @@ final class LibraryViewController: NSViewController,
             permanentlyDeleteFromMenu(nil)
             return
         }
-        guard let lib = library else { return }
+        guard library != nil else { return }
         let toDelete = deletableAssets(forGridIndices: collectionView.selectionIndexPaths
             .map { $0.item }
             .sorted())
@@ -707,23 +808,14 @@ final class LibraryViewController: NSViewController,
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Delete \(count) photo\(count == 1 ? "" : "s")?"
-        alert.informativeText = "Originals, RAW companions, sidecars and thumbnails will be removed from this library. This can't be undone."
-        alert.addButton(withTitle: "Delete")
+        alert.messageText = "Move \(count) photo\(count == 1 ? "" : "s") to Trash?"
+        alert.informativeText = "They'll go to Recently Deleted. You can put them back with Undo (⌘Z) or from Recently Deleted."
+        alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
 
         let proceed: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .alertFirstButtonReturn, let self = self else { return }
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    try lib.deleteAssets(toDelete)
-                } catch {
-                    DispatchQueue.main.async {
-                        NSAlert(error: error).runModal()
-                    }
-                }
-                DispatchQueue.main.async { self.reload() }
-            }
+            self.applyTrash(assets: toDelete, trash: true, actionName: "Move to Trash")
         }
 
         if let window = view.window {
@@ -916,36 +1008,21 @@ final class LibraryViewController: NSViewController,
     /// Per-tile heart click handler. Looks up the asset by id (the closure
     /// captures id, not the asset value, so it's still valid after a reload).
     private func toggleFavoriteByID(_ id: UUID) {
-        guard let lib = library,
-              let asset = assets.first(where: { $0.id == id }) else { return }
-        do {
-            try lib.setFavorite(asset, isFavorite: !asset.isFavorite)
-        } catch {
-            NSAlert(error: error).runModal()
-            return
-        }
-        reload()
+        guard let asset = assets.first(where: { $0.id == id }) else { return }
+        let target = !asset.isFavorite
+        applyFavorite(assets: [asset],
+                      newStates: [target],
+                      oldStates: [asset.isFavorite],
+                      actionName: target ? "Favorite" : "Remove from Favorites")
     }
 
     /// "JPEG", "HEIF", "HEIF + RAW", "JPEG + RAW", "RAW" — what the corner
     /// badge displays. Computed from the primary file's extension plus whether
-    /// any RAW companions are paired alongside.
+    /// any RAW companions are paired alongside. Delegates to PlateCore's
+    /// `Asset.formatLabel` so the badge and the Statistics "by format"
+    /// breakdown share one definition of the folded format string.
     private static func formatBadge(for asset: Asset) -> String {
-        let ext = (asset.primary as NSString).pathExtension.lowercased()
-        let base: String
-        switch ext {
-        case "jpg", "jpeg":             base = "JPEG"
-        case "heic", "heif", "hif":     base = "HEIF"
-        case "png":                     base = "PNG"
-        case "tif", "tiff":             base = "TIFF"
-        case "3fr", "fff", "nef", "nrw", "cr2", "cr3", "crw",
-             "arw", "srf", "sr2", "raf", "dng", "orf", "rw2",
-             "pef", "ptx", "srw", "rwl", "iiq":
-            return "RAW"
-        default:
-            base = ext.uppercased()
-        }
-        return asset.raws.isEmpty ? base : "\(base) + RAW"
+        asset.formatLabel
     }
 }
 

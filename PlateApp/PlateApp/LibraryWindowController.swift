@@ -1,7 +1,13 @@
 import AppKit
 import PlateCore
 
-final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMenuDelegate {
+final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMenuDelegate, NSWindowDelegate {
+
+    /// Backs Edit ▸ Undo / Redo (⌘Z / ⇧⌘Z). One manager per library window,
+    /// vended to the responder chain via `windowWillReturnUndoManager(_:)`.
+    /// LibraryViewController registers reversible edits (favorite / album /
+    /// trash) here by reading `view.window?.undoManager`.
+    let libraryUndoManager = UndoManager()
 
     private weak var libraryDocument: PlateDocument?
     /// Held strong so its scroll position / selection survive a detour through
@@ -18,6 +24,13 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
     private weak var progressCountLabel: NSTextField?
     private weak var viewModeSegment: NSSegmentedControl?
     private weak var sortToolbarMenu: NSMenu?
+    /// Held strong so the Statistics window survives between openings (and so
+    /// re-opening reuses + refreshes it rather than stacking duplicates).
+    private var statisticsWC: StatisticsWindowController?
+    /// The smart-filter popover and the toolbar button it anchors to. The button
+    /// reference lets us reflect active-filter state (filled icon) and re-anchor.
+    private var filterPopover: NSPopover?
+    private weak var filterButton: NSButton?
 
     init(document: PlateDocument) {
         self.libraryDocument = document
@@ -56,6 +69,7 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         vc.onImportPhase = { [weak self] phase in self?.applyImportPhase(phase) }
         vc.onDisplayModeChanged = { [weak self] mode in self?.syncViewModeSegment(mode) }
         vc.onAlbumsChanged = { [weak self] in self?.sidebarViewController?.refreshAlbums() }
+        vc.onFilterChanged = { [weak self] filter in self?.updateFilterButton(active: !filter.isEmpty) }
         self.libraryViewController = vc
 
         // Sidebar — Library / Favorites / Recently Deleted / Albums.
@@ -122,6 +136,11 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         )
         window.setFrame(centered, display: false)
 
+        // Become the window's delegate so we can vend `libraryUndoManager` to
+        // the responder chain. We implement only windowWillReturnUndoManager —
+        // all other NSWindowDelegate behavior stays at AppKit defaults.
+        window.delegate = self
+
         // Photos-style auto-import: watch for camera / SD-card mounts.
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -129,6 +148,10 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
             name: NSWorkspace.didMountNotification,
             object: nil
         )
+    }
+
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        libraryUndoManager
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -217,6 +240,61 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         } else {
             alert.runModal()
         }
+    }
+
+    /// File ▸ Library Statistics… Opens (or refreshes + refocuses) a window of
+    /// static analysis over the active library — equipment, time-of-capture and
+    /// daily-activity breakdowns.
+    @objc func showStatisticsFromMenu(_ sender: Any?) {
+        guard let library = libraryDocument?.library else { return }
+        let title = libraryDocument?.displayName ?? "Library"
+        if let wc = statisticsWC {
+            wc.refresh()
+        } else {
+            statisticsWC = StatisticsWindowController(library: library, libraryTitle: title)
+        }
+        statisticsWC?.showWindow(self)
+        statisticsWC?.window?.makeKeyAndOrderFront(self)
+    }
+
+    /// Toolbar filter button → toggle the smart-filter popover anchored to it.
+    @objc private func toggleFilterPopover(_ sender: Any?) {
+        if let pop = filterPopover, pop.isShown {
+            pop.performClose(sender)
+            return
+        }
+        guard let library = libraryDocument?.library,
+              let vc = libraryViewController,
+              let anchor = filterButton else { return }
+
+        let content = FilterPopoverViewController(
+            cameras: library.distinctCameras,
+            lenses: library.distinctLenses,
+            years: library.distinctCaptureYears,
+            current: vc.smartFilter
+        )
+        content.onChange = { [weak self] filter in
+            self?.libraryViewController?.setSmartFilter(filter)
+        }
+        let pop = NSPopover()
+        pop.contentViewController = content
+        pop.behavior = .transient
+        pop.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        filterPopover = pop
+    }
+
+    /// Reflect active-filter state on the toolbar button: a filled icon + accent
+    /// tint when any rule is set, the outline icon when the filter is clear.
+    private func updateFilterButton(active: Bool) {
+        guard let button = filterButton else { return }
+        let name = active ? "line.3.horizontal.decrease.circle.fill"
+                          : "line.3.horizontal.decrease.circle"
+        button.image = symbol(name, fallback: NSImage.Name("NSListViewTemplate"))
+        if #available(macOS 11.0, *) {
+            button.contentTintColor = active ? PlateColor.accent : nil
+        }
+        button.toolTip = active ? "Filter active — click to edit or clear"
+                                : "Filter photos by camera, lens, date and EXIF"
     }
 
     @objc func zoomIn(_ sender: Any?) {
@@ -401,11 +479,13 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         static let progress = NSToolbarItem.Identifier("Plate.progress")
         static let viewMode = NSToolbarItem.Identifier("Plate.viewMode")
         static let sort     = NSToolbarItem.Identifier("Plate.sort")
+        static let stats    = NSToolbarItem.Identifier("Plate.stats")
+        static let filter   = NSToolbarItem.Identifier("Plate.filter")
     }
 
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] =
-            [.toggleSidebar, TID.zoom, TID.progress, TID.viewMode, TID.sort, .flexibleSpace, .space]
+            [.toggleSidebar, TID.zoom, TID.progress, TID.viewMode, TID.sort, TID.filter, TID.stats, .flexibleSpace, .space]
         if #available(macOS 11.0, *) { ids.append(.sidebarTrackingSeparator) }
         return ids
     }
@@ -431,7 +511,7 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         // / setProgressItemVisible).
         var ids: [NSToolbarItem.Identifier] = [.toggleSidebar]
         if #available(macOS 11.0, *) { ids.append(.sidebarTrackingSeparator) }
-        ids += [.flexibleSpace, TID.viewMode, .flexibleSpace, TID.sort, .space, TID.zoom]
+        ids += [.flexibleSpace, TID.viewMode, .flexibleSpace, TID.filter, TID.stats, TID.sort, .space, TID.zoom]
         return ids
     }
 
@@ -454,6 +534,41 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
             seg.controlSize = .regular
             self.viewModeSegment = seg
             item.view = seg
+            return item
+
+        case TID.filter:
+            // Smart-filter button — opens a popover of Photos-style EXIF rules.
+            // Uses an NSButton as the item view so the popover can anchor to it;
+            // the icon fills (line.3…decrease.circle.fill) when a filter is live.
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.label = "Filter"
+            item.paletteLabel = "Filter"
+            item.toolTip = "Filter photos by camera, lens, date and EXIF"
+            let button = NSButton()
+            button.bezelStyle = .texturedRounded
+            button.image = symbol("line.3.horizontal.decrease.circle",
+                                  fallback: NSImage.Name("NSListViewTemplate"))
+            button.imagePosition = .imageOnly
+            button.target = self
+            button.action = #selector(toggleFilterPopover(_:))
+            self.filterButton = button
+            item.view = button
+            updateFilterButton(active: !(libraryViewController?.smartFilter.isEmpty ?? true))
+            return item
+
+        case TID.stats:
+            // Library Statistics button — opens the static-analysis window
+            // (same target as File ▸ Library Statistics… / ⌥⌘I). A plain icon
+            // button keeps it visually quiet next to the Sort pull-down.
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.label = "Statistics"
+            item.paletteLabel = "Library Statistics"
+            item.toolTip = "Show library statistics"
+            item.image = symbol("chart.bar.xaxis",
+                                 fallback: NSImage.Name("NSListViewTemplate"))
+            item.target = self
+            item.action = #selector(showStatisticsFromMenu(_:))
+            item.isBordered = true
             return item
 
         case TID.sort:

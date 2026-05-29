@@ -64,12 +64,34 @@ enum MainMenu {
         importCard.keyEquivalentModifierMask = [.command, .shift]   // ⇧⌘I
         menu.addItem(importCard)
         menu.addItem(.separator())
+        // Export the current grid selection out of the library. Actions reach
+        // LibraryViewController through the responder chain and self-validate:
+        // "Export Photos…" disables with no selection, "Export Originals" only
+        // enables when the selection carries a RAW / sidecar (mirrors the
+        // right-click context menu, which is the other entry point). ⇧⌘E is
+        // Apple's house style for Export across iWork / Photos.
+        let exportMasters = NSMenuItem(title: "Export Photos…",
+                                       action: #selector(LibraryViewController.exportMastersFromMenu(_:)),
+                                       keyEquivalent: "e")
+        exportMasters.keyEquivalentModifierMask = [.command, .shift]   // ⇧⌘E
+        menu.addItem(exportMasters)
+        menu.addItem(.init(title: "Export Originals (with RAW)…",
+                           action: #selector(LibraryViewController.exportOriginalsFromMenu(_:)),
+                           keyEquivalent: ""))
+        menu.addItem(.separator())
         // Re-derive thumbnails / EXIF / content hashes from the originals on
         // disk. Lives in File rather than View because it's a library-scoped
         // data operation, not a window-scoped display setting.
         menu.addItem(.init(title: "Rebuild Library Data…",
                            action: #selector(LibraryWindowController.rebuildLibraryDataFromMenu(_:)),
                            keyEquivalent: ""))
+        // Static analysis of the library — equipment, time-of-capture and daily
+        // activity breakdowns. Opens its own window off the active library.
+        let stats = NSMenuItem(title: "Library Statistics…",
+                               action: #selector(LibraryWindowController.showStatisticsFromMenu(_:)),
+                               keyEquivalent: "i")
+        stats.keyEquivalentModifierMask = [.command, .option]   // ⌥⌘I
+        menu.addItem(stats)
         menu.addItem(.separator())
         menu.addItem(.init(title: "Close",
                            action: #selector(NSWindow.performClose(_:)),
@@ -81,6 +103,19 @@ enum MainMenu {
     private static func editMenu() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Edit")
+        // Undo / Redo drive the active window's undo manager via the responder
+        // chain (LibraryWindowController vends it). Titles auto-update to
+        // "Undo Favorite", "Redo Move to Trash", etc. through AppKit's standard
+        // undo-menu management once the actions carry NSUndoManager action names.
+        menu.addItem(.init(title: "Undo",
+                           action: Selector(("undo:")),
+                           keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo",
+                              action: Selector(("redo:")),
+                              keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]   // ⇧⌘Z
+        menu.addItem(redo)
+        menu.addItem(.separator())
         menu.addItem(.init(title: "Select All",
                            action: #selector(NSResponder.selectAll(_:)),
                            keyEquivalent: "a"))

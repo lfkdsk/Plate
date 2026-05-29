@@ -76,4 +76,50 @@ final class AssetPairerTests: XCTestCase {
         XCTAssertEqual(pairs.count, 1)
         XCTAssertEqual(pairs[0].sidecars.map(\.lastPathComponent), ["IMG.xmp"])
     }
+
+    /// Every display-master + RAW combination sharing a basename folds into one
+    /// asset, regardless of which base type the master is (JPEG / HEIF / PNG /
+    /// TIFF). The display master is always the primary; the RAW hangs off it.
+    /// This is the RAW+JPEG / RAW+HEIF shooter's expectation at import time.
+    func testDisplayMasterPlusRawFoldsForAllBaseTypes() {
+        let cases: [(master: String, raw: String)] = [
+            ("IMG.JPG",  "IMG.CR3"),   // Canon RAW + JPEG
+            ("IMG.jpeg", "IMG.NEF"),   // Nikon
+            ("IMG.HEIC", "IMG.ARW"),   // Sony RAW + HEIF
+            ("IMG.hif",  "IMG.3FR"),   // Hasselblad RAW + HEIF
+            ("IMG.TIF",  "IMG.dng"),   // TIFF + DNG
+            ("IMG.png",  "IMG.rw2"),   // PNG + Panasonic RAW
+        ]
+        for c in cases {
+            let dir = "/card/\(UUID().uuidString)"
+            let pairs = AssetPairer.pair(files: [
+                url("\(dir)/\(c.master)"),
+                url("\(dir)/\(c.raw)"),
+            ])
+            XCTAssertEqual(pairs.count, 1, "\(c.master)+\(c.raw) should fold to one asset")
+            XCTAssertEqual(pairs.first?.primary.lastPathComponent, c.master,
+                           "display master should be primary for \(c.master)+\(c.raw)")
+            XCTAssertEqual(pairs.first?.raws.map { $0.lastPathComponent }, [c.raw])
+            XCTAssertFalse(pairs.first?.primaryIsRaw ?? true)
+        }
+    }
+
+    /// When one shot has two display masters AND a RAW (e.g. a camera writing
+    /// JPEG + HEIF, plus the RAW), it still collapses to a single asset: the
+    /// preferred master (HEIF) is primary, the RAW folds in, and the secondary
+    /// master is preserved as a tagalong sidecar — never silently dropped, so
+    /// import is lossless and export-with-RAW still carries it out.
+    func testMultipleDisplayMastersKeepSecondaryAsSidecar() {
+        let dir = "/card/multi"
+        let pairs = AssetPairer.pair(files: [
+            url("\(dir)/IMG.JPG"),
+            url("\(dir)/IMG.HEIC"),
+            url("\(dir)/IMG.3FR"),
+        ])
+        XCTAssertEqual(pairs.count, 1)
+        XCTAssertEqual(pairs[0].primary.lastPathComponent, "IMG.HEIC")
+        XCTAssertEqual(pairs[0].raws.map { $0.lastPathComponent }, ["IMG.3FR"])
+        // The JPEG isn't lost — it rides along as a sidecar of the same asset.
+        XCTAssertEqual(pairs[0].sidecars.map { $0.lastPathComponent }, ["IMG.JPG"])
+    }
 }

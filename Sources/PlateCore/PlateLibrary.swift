@@ -121,6 +121,41 @@ public final class PlateLibrary {
         (try? store.count()) ?? 0
     }
 
+    // MARK: - Statistics
+
+    /// Static analysis of the library — equipment, time-of-capture, and daily
+    /// activity breakdowns over every non-deleted asset. Computed on demand
+    /// from a fresh snapshot; cheap enough to call each time the view opens.
+    public func statistics(now: Date = Date()) -> LibraryStatistics {
+        LibraryStatistics.compute(from: assets, now: now)
+    }
+
+    // MARK: - Smart filter
+
+    /// Assets matching a Photos-style EXIF filter, newest capture first. The
+    /// filter is compiled to a parameterised SQL predicate and run in the store
+    /// (see SmartFilter.compile). An empty filter returns every non-deleted
+    /// asset — same as `assets`.
+    public func assets(matching filter: SmartFilter) -> [Asset] {
+        (try? store.assets(matching: filter.compile())) ?? []
+    }
+
+    /// Distinct camera models present in the library (for filter dropdowns),
+    /// alphabetised case-insensitively.
+    public var distinctCameras: [String] {
+        (try? store.distinctTextValues(column: "camera_model")) ?? []
+    }
+
+    /// Distinct lens models present in the library, alphabetised.
+    public var distinctLenses: [String] {
+        (try? store.distinctTextValues(column: "lens_model")) ?? []
+    }
+
+    /// Distinct capture years present in the library, most recent first.
+    public var distinctCaptureYears: [Int] {
+        (try? store.distinctCaptureYears()) ?? []
+    }
+
     // MARK: - Import
 
     public typealias ImportProgress = (_ completed: Int, _ total: Int) -> Void
@@ -206,7 +241,16 @@ public final class PlateLibrary {
                     pixelWidth: meta.pixelWidth,
                     pixelHeight: meta.pixelHeight,
                     thumbnail: thumbnailPath,
-                    contentHash: hash
+                    contentHash: hash,
+                    cameraMake: meta.cameraMake,
+                    cameraModel: meta.cameraModel,
+                    lensModel: meta.lensModel,
+                    focalLength: meta.focalLength,
+                    aperture: meta.aperture,
+                    shutterSpeed: meta.shutterSpeed,
+                    iso: meta.iso,
+                    latitude: meta.latitude,
+                    longitude: meta.longitude
                 )
                 try store.insert(asset)
                 imported.append(asset)
@@ -376,7 +420,16 @@ public final class PlateLibrary {
                     pixelWidth: meta.pixelWidth ?? asset.pixelWidth,
                     pixelHeight: meta.pixelHeight ?? asset.pixelHeight,
                     thumbnail: thumbnailPath,
-                    contentHash: hash
+                    contentHash: hash,
+                    cameraMake: meta.cameraMake ?? asset.cameraMake,
+                    cameraModel: meta.cameraModel ?? asset.cameraModel,
+                    lensModel: meta.lensModel ?? asset.lensModel,
+                    focalLength: meta.focalLength ?? asset.focalLength,
+                    aperture: meta.aperture ?? asset.aperture,
+                    shutterSpeed: meta.shutterSpeed ?? asset.shutterSpeed,
+                    iso: meta.iso ?? asset.iso,
+                    latitude: meta.latitude ?? asset.latitude,
+                    longitude: meta.longitude ?? asset.longitude
                 )
                 rebuilt += 1
             } catch {
