@@ -27,6 +27,9 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
     /// Held strong so the Statistics window survives between openings (and so
     /// re-opening reuses + refreshes it rather than stacking duplicates).
     private var statisticsWC: StatisticsWindowController?
+    /// The read-only web-gallery config panel (Share ▸ Web Server…). Held so
+    /// re-opening refocuses the same panel rather than stacking duplicates.
+    private var webServerWC: WebServerWindowController?
     /// The smart-filter popover and the toolbar button it anchors to. The button
     /// reference lets us reflect active-filter state (filled icon) and re-anchor.
     private var filterPopover: NSPopover?
@@ -201,6 +204,7 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
                 DispatchQueue.main.async {
                     self?.applyImportPhase(.finished)
                     self?.libraryViewController?.reload()
+                    WebServerCoordinator.shared.reloadIfRunning()
                     self?.presentRebuildSummary(result)
                 }
             } catch {
@@ -255,6 +259,23 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         }
         statisticsWC?.showWindow(self)
         statisticsWC?.window?.makeKeyAndOrderFront(self)
+    }
+
+    /// Share ▸ Web Server… — open (or refocus) the read-only web-gallery panel
+    /// bound to this window's library. The panel itself drives start/stop and
+    /// shows the address, password, and Cloudflare Tunnel hint.
+    @objc func showWebServerFromMenu(_ sender: Any?) {
+        guard let library = libraryDocument?.library else { return }
+        let title = libraryDocument?.displayName ?? "Library"
+        if let wc = webServerWC {
+            wc.updateBinding(library: library, libraryTitle: title)
+        } else {
+            let wc = WebServerWindowController(library: library, libraryTitle: title)
+            webServerWC = wc
+            wc.window?.center()
+        }
+        webServerWC?.showWindow(self)
+        webServerWC?.window?.makeKeyAndOrderFront(self)
     }
 
     /// Toolbar filter button → toggle the smart-filter popover anchored to it.
@@ -454,6 +475,7 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
                     sourceName: sourceName
                 ) { [weak self] in
                     self?.libraryViewController?.reload()
+                    WebServerCoordinator.shared.reloadIfRunning()
                 }
             }
         }

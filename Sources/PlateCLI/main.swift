@@ -21,9 +21,18 @@ func usage() {
       plate-cli init <Library.plate>
       plate-cli import <Library.plate> <source>...
       plate-cli list <Library.plate>
+      plate-cli serve <Library.plate> [--port N] [--token T | --no-auth] [--lan]
 
     `source` may be a file or a directory (scanned recursively for supported formats).
     Same-directory same-basename files are folded into a single asset.
+
+    `serve` starts a read-only web gallery for the library:
+      --port N      port to listen on (default 8080)
+      --token T     require this shared secret (Basic auth password / ?key=)
+      --no-auth     disable authentication (LAN only — never expose this)
+      --lan         bind all interfaces so other devices can reach it directly
+                    (default: loopback only, the safe pairing with a tunnel)
+    With no --token and no --no-auth, a random token is generated and printed.
     """
     print(text)
 }
@@ -90,6 +99,82 @@ func cmdList(_ args: [String]) throws {
     }
 }
 
+func cmdServe(_ args: [String]) throws {
+    guard let libPath = args.first else { throw CLIError.missingArgument("library path") }
+
+    var port: UInt16 = 8080
+    var token: String?
+    var explicitToken = false
+    var noAuth = false
+    var lan = false
+
+    let rest = Array(args.dropFirst())
+    var i = 0
+    while i < rest.count {
+        switch rest[i] {
+        case "--port", "-p":
+            i += 1
+            guard i < rest.count, let p = UInt16(rest[i]) else {
+                throw CLIError.missingArgument("--port <number>")
+            }
+            port = p
+        case "--token", "-t":
+            i += 1
+            guard i < rest.count else { throw CLIError.missingArgument("--token <secret>") }
+            token = rest[i]
+            explicitToken = true
+        case "--no-auth":
+            noAuth = true
+        case "--lan":
+            lan = true
+        default:
+            FileHandle.standardError.write(Data("Unknown option: \(rest[i])\n".utf8))
+            throw CLIError.usage
+        }
+        i += 1
+    }
+
+    let lib = try PlateLibrary.open(at: URL(fileURLWithPath: libPath).standardizedFileURL)
+
+    // Secure by default: with neither --token nor --no-auth, mint a random one
+    // so the gallery is never accidentally wide open.
+    let finalToken: String?
+    if noAuth {
+        finalToken = nil
+    } else if explicitToken {
+        finalToken = token
+    } else {
+        finalToken = PlateWebServer.generateToken()
+    }
+
+    let config = PlateWebServer.Configuration(port: port, token: finalToken, bindAllInterfaces: lan)
+    let server = PlateWebServer(library: lib, configuration: config)
+    try server.start()
+
+    let name = lib.url.deletingPathExtension().lastPathComponent
+    print("Plate web server — \(name)")
+    print("  Photos:      \(lib.assetCount)")
+    print("  Listening:   port \(port) — \(lan ? "all interfaces (LAN reachable)" : "loopback only (127.0.0.1)")")
+    print("")
+    if server.requiresAuth, let secret = finalToken {
+        print("  Open locally: \(server.localURLWithToken)")
+        print("  Access token: \(secret)")
+        print("  (Browsers show a login prompt — leave the username blank, paste the token as the password.)")
+    } else {
+        print("  Open locally: \(server.localURL)")
+        print("  WARNING: authentication is OFF — anyone who can reach this port sees every photo.")
+    }
+    if !lan {
+        print("")
+        print("  External access: point a Cloudflare Tunnel at http://127.0.0.1:\(port)")
+    }
+    print("")
+    print("  Press Ctrl-C to stop.")
+
+    // Block forever servicing connections on the listener's queue.
+    RunLoop.main.run()
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
 
 do {
@@ -100,6 +185,8 @@ do {
         try cmdImport(Array(args.dropFirst()))
     case "list":
         try cmdList(Array(args.dropFirst()))
+    case "serve":
+        try cmdServe(Array(args.dropFirst()))
     case "help", "--help", "-h", .none:
         usage()
     case .some(let cmd):

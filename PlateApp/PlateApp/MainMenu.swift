@@ -7,6 +7,7 @@ enum MainMenu {
         main.addItem(fileMenu())
         main.addItem(editMenu())
         main.addItem(viewMenu())
+        main.addItem(shareMenu())
         main.addItem(windowMenu())
         return main
     }
@@ -166,6 +167,20 @@ enum MainMenu {
         sortMenu.addItem(oldestFirst)
         sortItem.submenu = sortMenu
         menu.addItem(sortItem)
+        item.submenu = menu
+        return item
+    }
+
+    private static func shareMenu() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Share")
+        // Read-only web gallery for the active library. Routed to the library
+        // window controller through the responder chain (so it disables itself
+        // when no library is open). The panel handles start/stop, the access
+        // token, and the Cloudflare Tunnel hint.
+        menu.addItem(.init(title: "Web Server…",
+                           action: #selector(LibraryWindowController.showWebServerFromMenu(_:)),
+                           keyEquivalent: ""))
         item.submenu = menu
         return item
     }

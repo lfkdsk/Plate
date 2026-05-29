@@ -14,6 +14,11 @@ let package = Package(
         .target(
             name: "PlateCore",
             path: "Sources/PlateCore",
+            resources: [
+                // The web gallery's HTML lives as a real file, loaded at runtime
+                // via Bundle.module (see WebFrontend) rather than a string literal.
+                .copy("Web/Resources/gallery.html"),
+            ],
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
             ]
