@@ -24,6 +24,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.routeInitialLaunch()
         }
+
+        // Silent, throttled (once/day) update check against GitHub Releases.
+        // Never nags: only surfaces a prompt when a newer version exists.
+        UpdateCoordinator.checkOnLaunchIfDue()
+    }
+
+    /// App ▸ Check for Updates… — manual check that always reports back
+    /// (newer / up-to-date / error). Reaches here via the responder chain.
+    @objc func checkForUpdatesFromMenu(_ sender: Any?) {
+        UpdateCoordinator.checkManually()
     }
 
     /// Reopens the most recent library if one exists, otherwise shows the welcome

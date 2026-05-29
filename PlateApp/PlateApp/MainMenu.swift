@@ -18,6 +18,13 @@ enum MainMenu {
                            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                            keyEquivalent: ""))
         menu.addItem(.separator())
+        // In-app update check — queries GitHub Releases and offers to open the
+        // download page when a newer version is published. Routed to the app
+        // delegate through the responder chain.
+        menu.addItem(.init(title: "Check for Updates…",
+                           action: #selector(AppDelegate.checkForUpdatesFromMenu(_:)),
+                           keyEquivalent: ""))
+        menu.addItem(.separator())
         let hideOthers = NSMenuItem(title: "Hide Others",
                                     action: #selector(NSApplication.hideOtherApplications(_:)),
                                     keyEquivalent: "h")
