@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: com.lfkdsk
   deploymentTarget:
     macOS: "10.15"
+    iOS: "15.0"
   developmentLanguage: en
   createIntermediateGroups: true
 
@@ -37,6 +38,32 @@ targets:
         INFOPLIST_FILE: PlateApp/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+
+  # iPad/iPhone proof-of-concept target. Shares the macOS `PlateCore` package
+  # verbatim (the whole data/business layer); only the UIKit view layer is new.
+  # Demonstrates the "isomorphic core, native edges" path from the feasibility
+  # write-up — not a shipping app, a running existence proof.
+  PlateiOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: PlateiOS
+        excludes:
+          - "Info.plist"
+    dependencies:
+      - package: PlateCore
+        product: PlateCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lfkdsk.Plate.iOS
+        PRODUCT_NAME: PlateiOS
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: PlateiOS/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
