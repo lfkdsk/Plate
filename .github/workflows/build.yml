@@ -77,7 +77,8 @@ jobs:
   # lipo'd universal binary). Each arch produces:
   #   - Plate-macos-<arch>.zip          the .app, ad-hoc signed
   #   - plate-cli-macos-<arch>.tar.gz   the CLI + its PlateCore resource bundle
-  # each with a .sha256 sidecar. On a v* tag they're attached to the Release.
+  # each with a .sha256 sidecar, uploaded as workflow artifacts. On a v* tag the
+  # separate publish-release job collects them into one GitHub Release.
   build-release:
     name: Release (${{ matrix.arch }})
     needs: test-core
@@ -160,11 +161,11 @@ jobs:
           shasum -a 256 "$TAR" > "$TAR.sha256"
           echo "Built $TAR ($(du -h "$TAR" | cut -f1))"
 
-      # ---- upload ----
+      # ---- upload (the publish-release job turns these into the Release) ----
       - name: Upload artifacts (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: Plate-${{ matrix.arch }}-${{ github.sha }}
+          name: Plate-macos-${{ matrix.arch }}
           path: |
             PlateApp/build/Build/Products/Release/Plate-macos-${{ matrix.arch }}.zip
             PlateApp/build/Build/Products/Release/Plate-macos-${{ matrix.arch }}.zip.sha256
@@ -172,17 +173,39 @@ jobs:
             plate-cli-macos-${{ matrix.arch }}.tar.gz.sha256
           retention-days: 90
 
-      # Both arch jobs attach to the same Release; action-gh-release
-      # creates-or-updates it, so concurrent uploads of distinct files are fine.
-      - name: Attach to GitHub Release (tag push only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  # A single job attaches every arch's artifacts to one GitHub Release. Keeping
+  # this out of the build matrix avoids two runners racing to create the same
+  # release, and means only this job needs `contents: write` (the matrix builds
+  # stay read-only). Runs on Linux — it only moves files, no Xcode needed.
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Plate-macos-*
+          path: dist
+          merge-multiple: true
+
+      # upload-artifact keeps each artifact's nested path (e.g. PlateApp/build/
+      # …/Plate-macos-arm64.zip). Flatten every file into one dir so the
+      # release upload is a simple, unambiguous glob — all 8 basenames are
+      # unique, so nothing collides.
+      - name: Flatten into a release dir
+        run: |
+          mkdir -p out
+          find dist -type f -exec cp {} out/ \;
+          ls -la out
+
+      - name: Create / update the Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            PlateApp/build/Build/Products/Release/Plate-macos-${{ matrix.arch }}.zip
-            PlateApp/build/Build/Products/Release/Plate-macos-${{ matrix.arch }}.zip.sha256
-            plate-cli-macos-${{ matrix.arch }}.tar.gz
-            plate-cli-macos-${{ matrix.arch }}.tar.gz.sha256
+          files: out/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
