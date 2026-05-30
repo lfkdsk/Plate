@@ -40,8 +40,13 @@ Release builds land in `~/Library/Developer/Xcode/DerivedData/PlateApp-*/Build/P
 GitHub Actions on every push to `main` (and tags `v*`):
 
 - `test-core` — `swift test` for PlateCore
-- `build-debug` — verifies AppKit target compiles
-- `build-release` — produces `Plate.zip` as a workflow artifact (90-day retention); attaches it to a GitHub Release when a `v*` tag is pushed
+- `build-debug` — verifies the AppKit target compiles (Debug `.app` uploaded on every run, incl. PRs)
+- `build-release` — a per-architecture matrix (`arm64` + `x86_64`, built separately) producing, for each slice:
+  - `Plate-macos-<arch>.zip` — the ad-hoc-signed `.app`
+  - `plate-cli-macos-<arch>.tar.gz` — the CLI plus its PlateCore resource bundle
+  - a `.sha256` sidecar for each
+
+  Uploaded as 90-day workflow artifacts; all four (plus checksums) are attached to a GitHub Release when a `v*` tag is pushed. The `macos` runner is Apple Silicon, so the `x86_64` slice is cross-compiled (`ARCHS` / `--arch`).
 
 ## License
 
