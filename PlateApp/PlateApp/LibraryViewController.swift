@@ -1026,7 +1026,9 @@ final class LibraryViewController: NSViewController,
             item.configure(thumbnailURL: thumbURL,
                            formatBadge: Self.formatBadge(for: asset),
                            bigOverlay: nil,
-                           isFavorite: asset.isFavorite)
+                           isFavorite: asset.isFavorite,
+                           mediaType: asset.mediaType,
+                           duration: asset.duration)
             // Capture by asset.id rather than by `asset` (a struct) so the
             // closure stays correct even after the user reorders / filters.
             let assetID = asset.id

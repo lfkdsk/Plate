@@ -13,6 +13,22 @@ enum CLIError: Error, CustomStringConvertible {
     }
 }
 
+/// A short tag for non-still assets in CLI listings: " [VIDEO 0:12]" / " [LIVE]".
+func mediaTag(_ a: Asset) -> String {
+    switch a.mediaType {
+    case .image:
+        return ""
+    case .video:
+        if let d = a.duration, d > 0 {
+            let total = Int(d.rounded())
+            return String(format: "  [VIDEO %d:%02d]", total / 60, total % 60)
+        }
+        return "  [VIDEO]"
+    case .livePhoto:
+        return "  [LIVE]"
+    }
+}
+
 func usage() {
     let text = """
     plate-cli — Plate photo library command line
@@ -70,7 +86,7 @@ func cmdImport(_ args: [String]) throws {
     print("Imported \(result.imported.count) asset(s)")
     for a in result.imported {
         let raws = a.raws.isEmpty ? "" : "  [+\(a.raws.count) RAW]"
-        print("  \(a.id.uuidString.prefix(8))  \(a.primary)\(raws)")
+        print("  \(a.id.uuidString.prefix(8))  \(a.primary)\(raws)\(mediaTag(a))")
     }
     if !result.duplicates.isEmpty {
         print("Skipped \(result.duplicates.count) duplicate(s):")
@@ -95,7 +111,7 @@ func cmdList(_ args: [String]) throws {
     for a in lib.manifest.assets {
         let when = a.capturedAt.map { isoFmt.string(from: $0) } ?? "?"
         let raws = a.raws.isEmpty ? "" : "  [+\(a.raws.count) RAW]"
-        print("  \(a.id.uuidString.prefix(8))  \(when)  \(a.primary)\(raws)")
+        print("  \(a.id.uuidString.prefix(8))  \(when)  \(a.primary)\(raws)\(mediaTag(a))")
     }
 }
 

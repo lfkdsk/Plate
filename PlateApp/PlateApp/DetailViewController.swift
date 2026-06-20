@@ -1,5 +1,9 @@
 import AppKit
 import ImageIO
+import AVKit
+import AVFoundation
+import Photos
+import PhotosUI
 import PlateCore
 
 /// Photos-app-style single-asset viewer. No persistent HUD bar — image fills
@@ -28,6 +32,16 @@ final class DetailViewController: NSViewController {
 
     private let imageView = NonGreedyImageView()
     private let imageScrollView = NSScrollView()
+
+    /// Video + Live Photo playback surfaces, created lazily the first time a
+    /// non-still asset is shown and reused thereafter. Both are inserted *below*
+    /// the `chrome` overlay so the close / nav / caption controls stay on top.
+    private var playerView: AVPlayerView?
+    private var player: AVPlayer?
+    private var livePhotoView: PHLivePhotoView?
+
+    /// Which surface is currently front-most. Drives `setMediaMode` show/hide.
+    private enum MediaMode { case image, video, livePhoto }
     /// Whole-window overlay holding the floating buttons / caption / strip.
     /// Uses `PassThroughView` so empty areas don't swallow pinch-to-zoom or
     /// two-finger pan gestures — those need to reach the imageScrollView below.
@@ -285,6 +299,8 @@ final class DetailViewController: NSViewController {
         super.viewWillDisappear()
         hideTimer?.invalidate()
         hideTimer = nil
+        // Stop playback + audio when the viewer is dismissed.
+        teardownPlayback()
     }
 
     // MARK: - Chrome auto-hide
@@ -356,6 +372,40 @@ final class DetailViewController: NSViewController {
         // Keep the prior image visible until the new one decodes — no flash.
         loadGeneration &+= 1
         let generation = loadGeneration
+
+        // Stop and release any prior video/Live Photo before showing the next
+        // asset — kills audio and frees the player even when navigating from a
+        // movie straight to a still.
+        teardownPlayback()
+
+        switch asset.mediaType {
+        case .image:     showImage(asset: asset, generation: generation)
+        case .video:     showVideo(asset: asset)
+        case .livePhoto: showLivePhoto(asset: asset, generation: generation)
+        }
+    }
+
+    // MARK: - Media surfaces
+
+    /// Show / hide the three content surfaces so exactly one is front-most.
+    private func setMediaMode(_ mode: MediaMode) {
+        imageScrollView.isHidden = (mode != .image)
+        playerView?.isHidden     = (mode != .video)
+        livePhotoView?.isHidden  = (mode != .livePhoto)
+    }
+
+    /// Pause + release the active player / Live Photo. Safe to call when nothing
+    /// is playing. Leaves the (reusable) views in place, just emptied.
+    private func teardownPlayback() {
+        player?.pause()
+        player = nil
+        playerView?.player = nil
+        livePhotoView?.stopPlayback()
+        livePhotoView?.livePhoto = nil
+    }
+
+    private func showImage(asset: Asset, generation: Int) {
+        setMediaMode(.image)
         loadedAtMaxPixel = 0
         let url = library.absoluteURL(forRelative: asset.primary)
         let targetMaxPixel = Self.fastMaxPixel
@@ -370,6 +420,102 @@ final class DetailViewController: NSViewController {
                     self.loadedAtMaxPixel = targetMaxPixel
                 }
             }
+        }
+    }
+
+    private func showVideo(asset: Asset) {
+        let url = library.absoluteURL(forRelative: asset.primary)
+        let pv = ensurePlayerView()
+        let newPlayer = AVPlayer(url: url)
+        player = newPlayer
+        pv.player = newPlayer
+        setMediaMode(.video)
+        newPlayer.play()
+    }
+
+    private func showLivePhoto(asset: Asset, generation: Int) {
+        // A Live Photo with no motion file on the row is just a still — fall back
+        // rather than showing an empty Live Photo view.
+        guard let motion = asset.motionPath else {
+            showImage(asset: asset, generation: generation)
+            return
+        }
+        let stillURL = library.absoluteURL(forRelative: asset.primary)
+        let motionURL = library.absoluteURL(forRelative: motion)
+        let lpv = ensureLivePhotoView()
+        lpv.livePhoto = nil
+        setMediaMode(.livePhoto)
+
+        PHLivePhoto.request(withResourceFileURLs: [stillURL, motionURL],
+                            placeholderImage: nil,
+                            targetSize: .zero,
+                            contentMode: .aspectFit) { [weak self] livePhoto, info in
+            // The handler can fire on a background queue and more than once (a
+            // degraded placeholder, then the full asset). Hop to main, guard the
+            // navigation generation, and only auto-play the non-degraded result.
+            DispatchQueue.main.async {
+                guard let self = self,
+                      self.loadGeneration == generation,
+                      let livePhoto = livePhoto else { return }
+                lpv.livePhoto = livePhoto
+                let degraded = (info[PHLivePhotoInfoIsDegradedKey] as? NSNumber)?.boolValue ?? false
+                if !degraded { lpv.startPlayback(with: .full) }
+            }
+        }
+    }
+
+    /// Lazily build the AVPlayerView, inserted just below the chrome overlay and
+    /// pinned to the content edges. Floating controls (auto-hiding scrubber +
+    /// play/pause) match the viewer's minimal aesthetic.
+    private func ensurePlayerView() -> AVPlayerView {
+        if let pv = playerView { return pv }
+        let pv = AVPlayerView()
+        pv.controlsStyle = .floating
+        pv.videoGravity = .resizeAspect
+        pv.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(pv, positioned: .below, relativeTo: chrome)
+        NSLayoutConstraint.activate([
+            pv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pv.topAnchor.constraint(equalTo: view.topAnchor),
+            pv.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        playerView = pv
+        return pv
+    }
+
+    private func ensureLivePhotoView() -> PHLivePhotoView {
+        if let lpv = livePhotoView { return lpv }
+        let lpv = PHLivePhotoView()
+        lpv.contentMode = .aspectFit
+        lpv.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(lpv, positioned: .below, relativeTo: chrome)
+        NSLayoutConstraint.activate([
+            lpv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            lpv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            lpv.topAnchor.constraint(equalTo: view.topAnchor),
+            lpv.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        livePhotoView = lpv
+        return lpv
+    }
+
+    /// Space-bar behavior for the current asset: play/pause a video, replay a
+    /// Live Photo's motion. Returns false for stills so the caller falls back to
+    /// the historical "Space closes the viewer".
+    private func handleSpaceForMedia() -> Bool {
+        guard currentIndex >= 0, currentIndex < assets.count else { return false }
+        switch assets[currentIndex].mediaType {
+        case .video:
+            if let player = player {
+                if player.rate == 0 { player.play() } else { player.pause() }
+            }
+            return true
+        case .livePhoto:
+            livePhotoView?.startPlayback(with: .full)
+            return true
+        case .image:
+            return false
         }
     }
 
@@ -389,6 +535,10 @@ final class DetailViewController: NSViewController {
     // MARK: - High-res upgrade
 
     @objc private func didEndLiveMagnify(_ note: Notification) {
+        // Magnification only applies to the still image surface; video / Live
+        // Photo manage their own scaling.
+        guard currentIndex >= 0, currentIndex < assets.count,
+              assets[currentIndex].mediaType == .image else { return }
         upgradeIfNeeded()
         downgradeIfNeeded()
     }
@@ -614,15 +764,60 @@ final class DetailViewController: NSViewController {
         let url = library.absoluteURL(forRelative: asset.primary)
         exifLabel.attributedStringValue = Self.exifPlaceholder("Reading…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let info = ExifInfo.read(url: url)
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size])
                 .flatMap { ($0 as? NSNumber)?.int64Value }
-            let text = Self.formatExif(info, fileSize: size)
+            // Movies carry no ImageIO EXIF; describe them from the row instead
+            // (resolution, duration, date, size) rather than "No EXIF metadata".
+            let text: NSAttributedString = (asset.mediaType == .video)
+                ? Self.formatVideoInfo(asset, fileSize: size)
+                : Self.formatExif(ExifInfo.read(url: url), fileSize: size)
             DispatchQueue.main.async {
                 guard let self = self, self.exifVisible, self.currentIndex == idx else { return }
                 self.exifLabel.attributedStringValue = text
             }
         }
+    }
+
+    /// Info-panel block for a video, built from the stored row (no ImageIO).
+    /// "Video" header, then resolution · duration, capture date, file size, GPS.
+    private static func formatVideoInfo(_ asset: Asset, fileSize: Int64?) -> NSAttributedString {
+        let primary: [NSAttributedString.Key: Any] = [
+            .font: PlateFont.mono(11, weight: .medium),
+            .foregroundColor: PlateColor.textPrimary,
+        ]
+        let muted: [NSAttributedString.Key: Any] = [
+            .font: PlateFont.mono(10),
+            .foregroundColor: PlateColor.textMuted,
+            .kern: 0.3,
+        ]
+        var lines: [(String, [NSAttributedString.Key: Any])] = [("Video", primary)]
+
+        var dims: [String] = []
+        if let w = asset.pixelWidth, let h = asset.pixelHeight { dims.append("\(w) × \(h)") }
+        if let d = asset.duration, d > 0 {
+            let t = Int(d.rounded())
+            dims.append(String(format: "%d:%02d", t / 60, t % 60))
+        }
+        if let bytes = fileSize {
+            dims.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+        }
+        if !dims.isEmpty { lines.append((dims.joined(separator: "  ·  "), muted)) }
+
+        if let d = asset.capturedAt { lines.append((exifDateFormatter.string(from: d), muted)) }
+        if let lat = asset.latitude, let lon = asset.longitude {
+            lines.append((String(format: "%.5f, %.5f", lat, lon), muted))
+        }
+
+        let out = NSMutableAttributedString()
+        for (i, line) in lines.enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: "\n")) }
+            out.append(NSAttributedString(string: line.0, attributes: line.1))
+        }
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 2
+        out.addAttribute(.paragraphStyle, value: para,
+                         range: NSRange(location: 0, length: out.length))
+        return out
     }
 
     private static let exifDateFormatter: DateFormatter = {
@@ -728,7 +923,9 @@ final class DetailViewController: NSViewController {
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
-        case 53, 49: close(nil)             // Escape, Space
+        case 53:     close(nil)             // Escape
+        case 49:                            // Space — play/pause media, else close
+            if !handleSpaceForMedia() { close(nil) }
         case 123:    previous(nil)          // ←
         case 124:    nextItem(nil)          // →
         case 125:    nextItem(nil)          // ↓

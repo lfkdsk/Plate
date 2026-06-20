@@ -104,6 +104,63 @@ final class AssetPairerTests: XCTestCase {
         }
     }
 
+    // MARK: - Video & Live Photo
+
+    /// A movie sharing a still's basename is that still's Live Photo motion —
+    /// one asset, still is primary, movie is `motion`, kind is `.livePhoto`.
+    func testStillPlusMovieIsLivePhoto() {
+        let pairs = AssetPairer.pair(files: [
+            url("/dcim/IMG_0007.HEIC"),
+            url("/dcim/IMG_0007.MOV"),
+        ])
+        XCTAssertEqual(pairs.count, 1)
+        XCTAssertEqual(pairs[0].primary.lastPathComponent, "IMG_0007.HEIC")
+        XCTAssertEqual(pairs[0].motion?.lastPathComponent, "IMG_0007.MOV")
+        XCTAssertEqual(pairs[0].mediaType, .livePhoto)
+        // The movie is the motion companion, not a sidecar.
+        XCTAssertTrue(pairs[0].sidecars.isEmpty)
+    }
+
+    /// A movie with no same-basename still is a standalone video: the movie is
+    /// the primary and the kind is `.video`.
+    func testVideoOnlyGroupBecomesVideo() {
+        let pairs = AssetPairer.pair(files: [
+            url("/dcim/CLIP_0001.mp4"),
+        ])
+        XCTAssertEqual(pairs.count, 1)
+        XCTAssertEqual(pairs[0].primary.lastPathComponent, "CLIP_0001.mp4")
+        XCTAssertNil(pairs[0].motion)
+        XCTAssertEqual(pairs[0].mediaType, .video)
+    }
+
+    /// Still + RAW + movie (a Live Photo shot also writing RAW): still is
+    /// primary, RAW hangs off `.raws`, movie is the motion companion.
+    func testStillPlusRawPlusMovieKeepsAllThree() {
+        let pairs = AssetPairer.pair(files: [
+            url("/dcim/IMG_9.HEIC"),
+            url("/dcim/IMG_9.DNG"),
+            url("/dcim/IMG_9.MOV"),
+        ])
+        XCTAssertEqual(pairs.count, 1)
+        XCTAssertEqual(pairs[0].primary.lastPathComponent, "IMG_9.HEIC")
+        XCTAssertEqual(pairs[0].raws.map(\.lastPathComponent), ["IMG_9.DNG"])
+        XCTAssertEqual(pairs[0].motion?.lastPathComponent, "IMG_9.MOV")
+        XCTAssertEqual(pairs[0].mediaType, .livePhoto)
+    }
+
+    /// A separate clip and a separate photo (different basenames) stay two
+    /// assets — one video, one image — never folded.
+    func testDistinctVideoAndPhotoStaySeparate() {
+        let pairs = AssetPairer.pair(files: [
+            url("/dcim/A.JPG"),
+            url("/dcim/B.MOV"),
+        ])
+        XCTAssertEqual(pairs.count, 2)
+        let byName = Dictionary(uniqueKeysWithValues: pairs.map { ($0.primary.lastPathComponent, $0) })
+        XCTAssertEqual(byName["A.JPG"]?.mediaType, .image)
+        XCTAssertEqual(byName["B.MOV"]?.mediaType, .video)
+    }
+
     /// When one shot has two display masters AND a RAW (e.g. a camera writing
     /// JPEG + HEIF, plus the RAW), it still collapses to a single asset: the
     /// preferred master (HEIF) is primary, the RAW folds in, and the secondary

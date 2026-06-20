@@ -157,6 +157,7 @@ struct HTTPResponse {
         switch status {
         case 200: return "OK"
         case 204: return "No Content"
+        case 206: return "Partial Content"
         case 400: return "Bad Request"
         case 401: return "Unauthorized"
         case 404: return "Not Found"

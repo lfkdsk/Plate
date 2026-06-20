@@ -23,6 +23,9 @@ public struct ImageMetadata {
     public var latitude: Double?
     /// GPS longitude in signed decimal degrees (west negative).
     public var longitude: Double?
+    /// Playback duration in seconds — set only for video assets (the EXIF/
+    /// ImageIO path never fills it; `VideoMetadataReader` does).
+    public var duration: Double?
 }
 
 public enum ExifReader {

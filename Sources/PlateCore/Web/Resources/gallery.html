@@ -62,6 +62,13 @@
     position:absolute; top:6px; right:7px; color:var(--accent); font-size:13px;
     text-shadow:0 1px 3px rgba(0,0,0,.7); pointer-events:none;
   }
+  /* Bottom-left media marker: "▶ 0:12" for video, "◉ LIVE" for a Live Photo. */
+  .badge {
+    position:absolute; left:6px; bottom:6px; pointer-events:none;
+    font-family:var(--mono); font-size:10px; letter-spacing:.04em;
+    color:var(--text); background:rgba(0,0,0,.58);
+    padding:2px 6px; border-radius:3px;
+  }
 
   .empty {
     font-family:var(--serif); font-style:italic; color:var(--subtle);
@@ -78,10 +85,12 @@
     flex:1; display:flex; align-items:center; justify-content:center;
     padding:40px 64px 86px; min-width:0; min-height:0;
   }
-  .lb-stage img {
+  .lb-stage img, .lb-stage video {
     max-width:92vw; max-height:82vh; object-fit:contain;
     box-shadow:0 24px 60px rgba(0,0,0,.6); border-radius:2px;
   }
+  .lb-stage video { background:#000; }
+  .lb-stage img[hidden], .lb-stage video[hidden] { display:none; }
   .lb-nav {
     position:fixed; top:0; bottom:0; width:64px; border:0; background:transparent;
     color:var(--faint); font-size:40px; cursor:pointer; transition:color .12s ease;
@@ -140,7 +149,7 @@
     <button class="lb-close" id="lbClose" aria-label="Close">✕</button>
     <button class="lb-nav lb-prev" id="lbPrev" aria-label="Previous">‹</button>
     <button class="lb-nav lb-next" id="lbNext" aria-label="Next">›</button>
-    <div class="lb-stage"><img id="lbImg" alt=""></div>
+    <div class="lb-stage"><img id="lbImg" alt=""><video id="lbVideo" playsinline controls hidden></video></div>
     <div class="lb-info" id="lbInfo"></div>
   </div>
 
@@ -154,6 +163,7 @@
   function thumbURL(id){ return withKey("/thumb/"+id); }
   function previewURL(id){ return withKey("/preview/"+id); }
   function originalURL(id){ return withKey("/original/"+id); }
+  function motionURL(id){ return withKey("/motion/"+id); }
 
   var grid = document.getElementById("grid");
   var countEl = document.getElementById("count");
@@ -161,6 +171,7 @@
   var errorEl = document.getElementById("error");
   var lb = document.getElementById("lightbox");
   var lbImg = document.getElementById("lbImg");
+  var lbVideo = document.getElementById("lbVideo");
   var lbInfo = document.getElementById("lbInfo");
 
   var GAP = 4, TARGET = 240;
@@ -170,6 +181,7 @@
   function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return ENTITIES[c]; }); }
   function fmtShutter(s){ if(!s) return null; return s>=1 ? (Math.round(s*10)/10)+"s" : "1/"+Math.round(1/s)+"s"; }
   function fmtDate(secs){ if(!secs) return null; try { return new Date(secs*1000).toLocaleString(); } catch(e){ return null; } }
+  function fmtDuration(secs){ var t=Math.max(0,Math.round(secs||0)); var m=Math.floor(t/60); var s=t%60; return m+":"+(s<10?"0":"")+s; }
 
   // Greedy justified layout — same shape as the app's JustifiedGridLayout:
   // accumulate aspect·TARGET (+ gaps) until the row would overflow, then
@@ -203,6 +215,13 @@
           var f = document.createElement("span"); f.className="fav"; f.textContent="♥";
           cell.appendChild(f);
         }
+        if(it.kind === "video" || it.kind === "livePhoto"){
+          var bd = document.createElement("span"); bd.className = "badge";
+          bd.textContent = (it.kind === "video")
+            ? "▶ " + (it.duration ? fmtDuration(it.duration) : "")
+            : "◉ LIVE";
+          cell.appendChild(bd);
+        }
         rowEl.appendChild(cell);
       }
       frag.appendChild(rowEl);
@@ -235,8 +254,29 @@
     current = i; render(); lb.hidden = false; document.body.classList.add("locked");
   }
   function closeLightbox(){
-    lb.hidden = true; lbImg.removeAttribute("src");
+    lb.hidden = true; lbImg.removeAttribute("src"); stopVideo();
     document.body.classList.remove("locked"); current = -1;
+  }
+
+  // Pause + unload the <video> and return to the still surface. Clearing src
+  // (not just pause) stops the network stream when navigating away.
+  function stopVideo(){
+    lbVideo.pause();
+    lbVideo.removeAttribute("src");
+    lbVideo.load();
+    lbVideo.hidden = true;
+    lbImg.hidden = false;
+  }
+  // Swap the stage to the <video>, play `src`. `loopOnce`=false leaves the last
+  // frame up at the end (Live Photo motion swaps back to the still instead).
+  function playVideo(src, isLiveMotion){
+    lbImg.hidden = true;
+    lbVideo.hidden = false;
+    lbVideo.dataset.live = isLiveMotion ? "1" : "";
+    lbVideo.src = src;
+    lbVideo.currentTime = 0;
+    var p = lbVideo.play();
+    if(p && p.catch) p.catch(function(){ /* autoplay may be blocked; controls remain */ });
   }
   function step(d){
     if(current<0) return;
@@ -247,7 +287,14 @@
 
   function render(){
     var it = items[current];
-    lbImg.src = previewURL(it.id);
+    // Pick the stage surface: video plays the original inline; image and Live
+    // Photo show the still (Live Photo gets a "◉ Live" button to play motion).
+    stopVideo();
+    if(it.kind === "video"){
+      playVideo(originalURL(it.id), false);
+    } else {
+      lbImg.src = previewURL(it.id);
+    }
     var parts = [];
     if(it.camera) parts.push(esc(it.camera));
     if(it.lens) parts.push(esc(it.lens));
@@ -258,10 +305,11 @@
     if(it.iso) tech.push("ISO "+it.iso);
     if(tech.length) parts.push(tech.join("  ·  "));
     var d = fmtDate(it.captured); if(d) parts.push(esc(d));
+    if(it.kind === "video" && it.duration) parts.push(fmtDuration(it.duration));
     if(it.format) parts.push(esc(it.format));
-    // One download button per file: the display master (HEIF/JPEG) plus every
-    // RAW companion (.3FR, .NEF, …) and sidecar (.XMP/.AAE). The server sets
-    // Content-Disposition so each saves with its real filename.
+    // One download button per file: the display master (HEIF/JPEG/movie) plus
+    // every RAW companion (.3FR, .NEF, …) and sidecar (.XMP/.AAE). The server
+    // sets Content-Disposition so each saves with its real filename.
     var dls = '<span class="dl-label">Download</span>';
     dls += '<a class="dl" href="'+originalURL(it.id)+'" download="'+esc(it.filename||"")+'">'+(it.ext ? esc(it.ext.toUpperCase()) : 'Original')+'</a>';
     (it.raws || []).forEach(function(ext, i){
@@ -270,12 +318,25 @@
     (it.sidecars || []).forEach(function(ext, i){
       dls += '<a class="dl" href="'+withKey('/sidecar/'+it.id+'/'+i)+'">'+esc(ext.toUpperCase())+'</a>';
     });
-    lbInfo.innerHTML = '<div class="lb-line">'+parts.join('<span class="sep">·</span>')+'</div><div class="lb-actions">'+dls+'</div>';
+    // Live Photo: play the motion clip in place (swaps back to the still when done).
+    var live = (it.kind === "livePhoto")
+      ? '<button class="dl" type="button" id="livePlay">◉ Live</button>' : '';
+    lbInfo.innerHTML = '<div class="lb-line">'+parts.join('<span class="sep">·</span>')+'</div><div class="lb-actions">'+live+dls+'</div>';
   }
 
   document.getElementById("lbClose").addEventListener("click", closeLightbox);
   document.getElementById("lbPrev").addEventListener("click", function(){ step(-1); });
   document.getElementById("lbNext").addEventListener("click", function(){ step(1); });
+  // "◉ Live" button (rebuilt each render) — delegate off the info bar.
+  lbInfo.addEventListener("click", function(e){
+    if(e.target && e.target.id === "livePlay" && current >= 0){
+      playVideo(motionURL(items[current].id), true);
+    }
+  });
+  // Live Photo motion plays once, then reveals the still again.
+  lbVideo.addEventListener("ended", function(){
+    if(lbVideo.dataset.live === "1") stopVideo();
+  });
   lb.addEventListener("click", function(e){
     if(e.target===lb || e.target.classList.contains("lb-stage")) closeLightbox();
   });

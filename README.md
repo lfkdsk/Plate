@@ -3,9 +3,10 @@
 Native macOS photo library for Hasselblad RAW (3FR / FFF) and modern HEIF/JPEG, designed for photographers Apple Photos can't ingest. Same-dir same-basename pairing folds HEIC + RAW into one asset; the SQLite-backed library bundle (`.plate`) is rescue-friendly (`Originals/yyyy/yyyy-MM-dd/` on disk, no opaque blobs).
 
 - Swift + AppKit, macOS 10.15+
-- No external dependencies — ImageIO, CryptoKit, SQLite3 are all system frameworks
+- No external dependencies — ImageIO, AVFoundation, CryptoKit, SQLite3 are all system frameworks
 - `.plate` bundle: `Originals/`, `Caches/thumbs/`, `library.db`
 - Year / Month / All Photos browsing; Favorites; user-defined Albums; soft-delete with Recently Deleted
+- **Video & Live Photos** — movies (`.mov` / `.mp4` / …) import with a poster frame + duration and play in-viewer (AVPlayer); a still + same-basename `.mov` folds into one Live Photo (the still is the master, the clip plays on demand via `PHLivePhotoView`). The web gallery plays both too (`<video>` with HTTP Range)
 
 ![App icon](Branding/logo-f-italic-p.svg)
 
@@ -28,7 +29,7 @@ Release builds land in `~/Library/Developer/Xcode/DerivedData/PlateApp-*/Build/P
 
 | Path | Role |
 |------|------|
-| `Sources/PlateCore/` | Library: store, pairer, scanner, EXIF reader, thumbnailer |
+| `Sources/PlateCore/` | Library: store, pairer, scanner, EXIF + video metadata readers, thumbnailer, web gallery |
 | `Sources/PlateCLI/` | `plate-cli` for ingest from terminal |
 | `PlateApp/PlateApp/` | AppKit shell (windows, view controllers, menus) |
 | `PlateApp/project.yml` | xcodegen manifest — single source of truth for the .xcodeproj |
