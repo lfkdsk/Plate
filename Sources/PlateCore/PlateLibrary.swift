@@ -198,7 +198,7 @@ public final class PlateLibrary {
                     continue
                 }
 
-                let meta = ExifReader.readMetadata(for: pair.primary)
+                let meta = MediaMetadataReader.readMetadata(for: pair.primary)
                 let dateSubpath = Self.dateDirectory(for: meta.capturedAt ?? Date())
                 let targetDir = originalsDir.appendingPathComponent(dateSubpath, isDirectory: true)
                 try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
@@ -217,6 +217,16 @@ public final class PlateLibrary {
                     let target = targetDir.appendingPathComponent("\(finalBasename).\(side.pathExtension)")
                     try Self.copyOverwriting(side, to: target)
                     copiedSidecars.append(target)
+                }
+
+                // Live Photo motion companion: copy it next to the still under the
+                // same (possibly collision-renamed) basename so the pair stays
+                // co-located and re-pairs cleanly on a future export → re-import.
+                var motionRelPath: String?
+                if let motion = pair.motion {
+                    let target = targetDir.appendingPathComponent("\(finalBasename).\(motion.pathExtension)")
+                    try Self.copyOverwriting(motion, to: target)
+                    motionRelPath = relativePath(of: target)
                 }
 
                 let assetID = UUID()
@@ -242,6 +252,9 @@ public final class PlateLibrary {
                     pixelHeight: meta.pixelHeight,
                     thumbnail: thumbnailPath,
                     contentHash: hash,
+                    mediaType: pair.mediaType,
+                    motionPath: motionRelPath,
+                    duration: meta.duration,
                     cameraMake: meta.cameraMake,
                     cameraModel: meta.cameraModel,
                     lensModel: meta.lensModel,
@@ -322,6 +335,14 @@ public final class PlateLibrary {
                 let masterDest = try copyAvoidingCollision(
                     absoluteURL(forRelative: asset.primary), into: destination)
                 let base = masterDest.deletingPathExtension().lastPathComponent
+                // A Live Photo's motion clip is intrinsic to the asset (not a
+                // RAW/sidecar opt-out) — always carry it so the export stays a
+                // Live Photo and re-pairs on a future import.
+                if let motion = asset.motionPath {
+                    let src = absoluteURL(forRelative: motion)
+                    let target = destination.appendingPathComponent("\(base).\(src.pathExtension)")
+                    try Self.copyOverwriting(src, to: target)
+                }
                 if includeRaws {
                     for raw in asset.raws {
                         let src = absoluteURL(forRelative: raw)
@@ -390,7 +411,7 @@ public final class PlateLibrary {
                     ])
                 }
 
-                let meta = ExifReader.readMetadata(for: primaryURL)
+                let meta = MediaMetadataReader.readMetadata(for: primaryURL)
                 let hash = try Self.sha256Hex(of: primaryURL)
 
                 let thumbURL = thumbsDir.appendingPathComponent(
@@ -429,7 +450,8 @@ public final class PlateLibrary {
                     shutterSpeed: meta.shutterSpeed ?? asset.shutterSpeed,
                     iso: meta.iso ?? asset.iso,
                     latitude: meta.latitude ?? asset.latitude,
-                    longitude: meta.longitude ?? asset.longitude
+                    longitude: meta.longitude ?? asset.longitude,
+                    duration: meta.duration ?? asset.duration
                 )
                 rebuilt += 1
             } catch {
@@ -464,6 +486,9 @@ public final class PlateLibrary {
             }
             for side in asset.sidecars {
                 try? fm.removeItem(at: absoluteURL(forRelative: side))
+            }
+            if let motion = asset.motionPath {
+                try? fm.removeItem(at: absoluteURL(forRelative: motion))
             }
             if let thumb = asset.thumbnail {
                 try? fm.removeItem(at: absoluteURL(forRelative: thumb))

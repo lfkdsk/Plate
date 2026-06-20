@@ -1,4 +1,5 @@
 import AppKit
+import PlateCore
 
 final class AssetItemView: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("AssetItem")
@@ -7,6 +8,10 @@ final class AssetItemView: NSCollectionViewItem {
     private let hoverOverlay = CALayer()
     private let badgePill = NSView()
     private let badgeLabel = NSTextField(labelWithString: "")
+    /// Bottom-left pill marking a video ("▶︎ 0:12") or Live Photo ("◉ LIVE").
+    /// Mutually exclusive — an asset is exactly one media type. Hidden for stills.
+    private let mediaPill = NSView()
+    private let mediaLabel = NSTextField(labelWithString: "")
     private let bigOverlayLabel = NSTextField(labelWithString: "")
     private let bigOverlayDimmer = CALayer()
     private let favoriteButton = NSButton()
@@ -95,6 +100,31 @@ final class AssetItemView: NSCollectionViewItem {
             badgeLabel.bottomAnchor.constraint(equalTo: badgePill.bottomAnchor, constant: -2),
         ])
 
+        // Bottom-left media-type pill (video duration / LIVE) — same dark
+        // translucent chip as the format badge so it stays legible over any
+        // photo. Bottom-left keeps it clear of the top-left format badge and the
+        // top-right favorite heart.
+        mediaPill.wantsLayer = true
+        mediaPill.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        mediaPill.layer?.cornerRadius = 2
+        mediaPill.translatesAutoresizingMaskIntoConstraints = false
+        mediaPill.isHidden = true
+        v.addSubview(mediaPill)
+
+        mediaLabel.alignment = .center
+        mediaLabel.translatesAutoresizingMaskIntoConstraints = false
+        mediaPill.addSubview(mediaLabel)
+
+        NSLayoutConstraint.activate([
+            mediaPill.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 6),
+            mediaPill.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -6),
+
+            mediaLabel.leadingAnchor.constraint(equalTo: mediaPill.leadingAnchor, constant: 5),
+            mediaLabel.trailingAnchor.constraint(equalTo: mediaPill.trailingAnchor, constant: -5),
+            mediaLabel.topAnchor.constraint(equalTo: mediaPill.topAnchor, constant: 2),
+            mediaLabel.bottomAnchor.constraint(equalTo: mediaPill.bottomAnchor, constant: -2),
+        ])
+
         // Favorite affordance — clickable heart in the top-right corner.
         // Visible:
         //   - always when the asset is already a favorite (filled red heart)
@@ -158,6 +188,41 @@ final class AssetItemView: NSCollectionViewItem {
         badgePill.isHidden = !hasBadge || view.bounds.height < Self.badgeMinTileHeight
     }
 
+    /// Populate (or hide) the bottom-left media pill. Stills show nothing; a
+    /// video shows "▶︎ m:ss" (or just the glyph when duration is unknown); a Live
+    /// Photo shows "◉ LIVE". Plain glyphs (not SF Symbols) so it renders on the
+    /// 10.15 deployment floor without an availability dance.
+    private func configureMediaPill(mediaType: MediaType, duration: Double?) {
+        let text: String?
+        switch mediaType {
+        case .image:
+            text = nil
+        case .video:
+            text = duration.map { "▶︎ " + Self.durationString($0) } ?? "▶︎"
+        case .livePhoto:
+            text = "◉ LIVE"
+        }
+        guard let label = text else {
+            mediaLabel.stringValue = ""
+            mediaPill.isHidden = true
+            return
+        }
+        let attr = NSMutableAttributedString(string: label)
+        attr.addAttributes([
+            .font: PlateFont.mono(9, weight: .medium),
+            .foregroundColor: PlateColor.textPrimary,
+            .kern: 0.6,
+        ], range: NSRange(location: 0, length: attr.length))
+        mediaLabel.attributedStringValue = attr
+        mediaPill.isHidden = false
+    }
+
+    /// Seconds → "m:ss" (e.g. 12 → "0:12", 65 → "1:05").
+    private static func durationString(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     override var isSelected: Bool {
         didSet { updateSelection() }
     }
@@ -183,10 +248,13 @@ final class AssetItemView: NSCollectionViewItem {
     func configure(thumbnailURL: URL?,
                    formatBadge: String?,
                    bigOverlay: String? = nil,
-                   isFavorite: Bool = false)
+                   isFavorite: Bool = false,
+                   mediaType: MediaType = .image,
+                   duration: Double? = nil)
     {
         thumbView.image = thumbnailURL.flatMap { NSImage(contentsOf: $0) }
         isFavorited = isFavorite
+        configureMediaPill(mediaType: mediaType, duration: duration)
         // Aggregate cards carry a `bigOverlay` label — they don't get the
         // favorite button (would be misleading and the click handler is wired
         // to a single Asset anyway).
@@ -238,6 +306,8 @@ final class AssetItemView: NSCollectionViewItem {
         badgeLabel.stringValue = ""
         badgePill.isHidden = true
         hasBadge = false
+        mediaLabel.stringValue = ""
+        mediaPill.isHidden = true
         bigOverlayLabel.stringValue = ""
         bigOverlayLabel.isHidden = true
         bigOverlayDimmer.isHidden = true

@@ -1,6 +1,8 @@
 import XCTest
 import ImageIO
 import CoreGraphics
+import AVFoundation
+import CoreVideo
 @testable import PlateCore
 
 final class PlateLibraryTests: XCTestCase {
@@ -216,6 +218,109 @@ final class PlateLibraryTests: XCTestCase {
         XCTAssertEqual(second.duplicates.first?.existing.id, first.imported.first?.id)
     }
 
+    // MARK: - Video & Live Photo (v6 schema)
+
+    func testImportVideoExtractsPosterAndDuration() throws {
+        let libURL = tempRoot.appendingPathComponent("VideoLib.plate")
+        let lib = try PlateLibrary.create(at: libURL)
+
+        let src = tempRoot.appendingPathComponent("vsrc")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        let clip = src.appendingPathComponent("CLIP_0001.MOV")
+        try Self.writeTestVideo(to: clip, width: 128, height: 96, frames: 15, fps: 30)
+
+        let pairs = AssetPairer.pair(files: [clip])
+        XCTAssertEqual(pairs.count, 1)
+        XCTAssertEqual(pairs[0].mediaType, .video)
+
+        let result = try lib.importPairs(pairs, thumbnailPixel: 64)
+        XCTAssertEqual(result.imported.count, 1)
+        XCTAssertTrue(result.failures.isEmpty)
+        let asset = result.imported[0]
+
+        // Stamped as video, with dimensions + duration read off the movie track.
+        XCTAssertEqual(asset.mediaType, .video)
+        XCTAssertEqual(asset.pixelWidth, 128)
+        XCTAssertEqual(asset.pixelHeight, 96)
+        XCTAssertNotNil(asset.duration)
+        XCTAssertGreaterThan(asset.duration ?? 0, 0)
+        XCTAssertNil(asset.motionPath)
+
+        // A poster frame was extracted and written to disk.
+        XCTAssertNotNil(asset.thumbnail)
+        let thumbAbs = lib.absoluteURL(forRelative: asset.thumbnail!)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: thumbAbs.path))
+
+        // media_type + duration survive a close + reopen (schema v6 columns).
+        let reopened = try PlateLibrary.open(at: libURL)
+        let ra = reopened.assets.first { $0.id == asset.id }
+        XCTAssertEqual(ra?.mediaType, .video)
+        XCTAssertEqual(ra?.pixelWidth, 128)
+        XCTAssertNotNil(ra?.duration)
+    }
+
+    func testImportLivePhotoPairsStillAndMotionAndExports() throws {
+        let libURL = tempRoot.appendingPathComponent("LiveLib.plate")
+        let lib = try PlateLibrary.create(at: libURL)
+
+        let src = tempRoot.appendingPathComponent("lsrc")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        let still = src.appendingPathComponent("IMG_0007.JPG")
+        let motion = src.appendingPathComponent("IMG_0007.MOV")
+        try Self.writeTestJPEG(to: still, width: 120, height: 90)
+        try Self.writeTestVideo(to: motion, width: 128, height: 96, frames: 8, fps: 30)
+
+        let pairs = AssetPairer.pair(files: [still, motion])
+        XCTAssertEqual(pairs.count, 1)
+        XCTAssertEqual(pairs[0].mediaType, .livePhoto)
+
+        let asset = try lib.importPairs(pairs, thumbnailPixel: 64).imported[0]
+        XCTAssertEqual(asset.mediaType, .livePhoto)
+        XCTAssertNotNil(asset.motionPath)
+        // Dimensions come from the still master (not the movie).
+        XCTAssertEqual(asset.pixelWidth, 120)
+        XCTAssertEqual(asset.pixelHeight, 90)
+
+        // Motion clip copied into the bundle next to the still.
+        let motionAbs = lib.absoluteURL(forRelative: asset.motionPath!)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: motionAbs.path))
+
+        // motion_path persists across reopen.
+        let reopened = try PlateLibrary.open(at: libURL)
+        XCTAssertEqual(reopened.assets.first { $0.id == asset.id }?.motionPath, asset.motionPath)
+
+        // Export carries BOTH the still and the motion so it re-pairs on import.
+        let dest = tempRoot.appendingPathComponent("lout")
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        let r = try lib.exportAssets([asset], to: dest)
+        XCTAssertEqual(r.exported, 1)
+        let names = Set(try FileManager.default.contentsOfDirectory(atPath: dest.path)
+            .map { $0.lowercased() })
+        XCTAssertTrue(names.contains("img_0007.jpg"))
+        XCTAssertTrue(names.contains("img_0007.mov"))
+    }
+
+    func testPermanentDeleteRemovesMotionFile() throws {
+        let libURL = tempRoot.appendingPathComponent("LiveDel.plate")
+        let lib = try PlateLibrary.create(at: libURL)
+
+        let src = tempRoot.appendingPathComponent("ldsrc")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        let still = src.appendingPathComponent("L.JPG")
+        let motion = src.appendingPathComponent("L.MOV")
+        try Self.writeTestJPEG(to: still, width: 64, height: 64)
+        try Self.writeTestVideo(to: motion, width: 64, height: 64, frames: 6, fps: 30)
+
+        let asset = try lib.importPairs(AssetPairer.pair(files: [still, motion]),
+                                        thumbnailPixel: 32).imported[0]
+        let motionAbs = lib.absoluteURL(forRelative: asset.motionPath!)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: motionAbs.path))
+
+        // Permanent delete removes the motion companion from disk too.
+        try lib.permanentlyDeleteAssets([asset])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: motionAbs.path))
+    }
+
     // MARK: - Sidebar features (v3 schema)
 
     func testFavoriteToggle() throws {
@@ -419,6 +524,60 @@ final class PlateLibraryTests: XCTestCase {
         CGImageDestinationAddImage(dest, cgImage, nil)
         guard CGImageDestinationFinalize(dest) else {
             throw NSError(domain: "PlateTests", code: 4)
+        }
+    }
+
+    /// Write a tiny real H.264 `.mov` (uniform gray frames) so tests exercise the
+    /// actual AVFoundation poster-frame + metadata paths. Dimensions must be even
+    /// for the H.264 encoder. Synchronous — waits on the async writer.
+    static func writeTestVideo(to url: URL,
+                               width: Int = 128,
+                               height: Int = 96,
+                               frames: Int = 12,
+                               fps: Int32 = 30) throws {
+        try? FileManager.default.removeItem(at: url)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+            ])
+        guard writer.canAdd(input) else { throw NSError(domain: "PlateTests", code: 10) }
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? NSError(domain: "PlateTests", code: 11) }
+        writer.startSession(atSourceTime: .zero)
+
+        for i in 0..<frames {
+            while !input.isReadyForMoreMediaData { usleep(1000) }
+            guard let pool = adaptor.pixelBufferPool else { throw NSError(domain: "PlateTests", code: 12) }
+            var maybePB: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &maybePB)
+            guard let pb = maybePB else { throw NSError(domain: "PlateTests", code: 13) }
+            CVPixelBufferLockBaseAddress(pb, [])
+            if let base = CVPixelBufferGetBaseAddress(pb) {
+                // Uniform fill — pixel content is irrelevant, only a decodable
+                // frame matters. Vary per frame so it's not a constant stream.
+                let bytes = CVPixelBufferGetBytesPerRow(pb) * CVPixelBufferGetHeight(pb)
+                memset(base, Int32(40 + (i * 12) % 180), bytes)
+            }
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            let t = CMTime(value: CMTimeValue(i), timescale: fps)
+            XCTAssertTrue(adaptor.append(pb, withPresentationTime: t))
+        }
+        input.markAsFinished()
+        let sem = DispatchSemaphore(value: 0)
+        writer.finishWriting { sem.signal() }
+        sem.wait()
+        guard writer.status == .completed else {
+            throw writer.error ?? NSError(domain: "PlateTests", code: 14)
         }
     }
 }

@@ -338,6 +338,12 @@ final class ImportPickerViewController: NSViewController {
     }
 
     private static func decodeThumb(url: URL, maxPixel: Int) -> NSImage? {
+        // Movies have no ImageIO source — pull a poster frame so video candidates
+        // aren't blank tiles in the picker.
+        if AssetKind.classify(pathExtension: url.pathExtension) == .video {
+            guard let cg = ThumbnailService.videoPosterFrame(from: url, maxPixel: maxPixel) else { return nil }
+            return NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+        }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -363,7 +369,8 @@ extension ImportPickerViewController: NSCollectionViewDataSource {
         item.configure(thumbnail: c.thumb,
                        selected: c.selected,
                        alreadyImported: c.alreadyImported,
-                       hasRaw: !c.pair.raws.isEmpty)
+                       hasRaw: !c.pair.raws.isEmpty,
+                       mediaType: c.pair.mediaType)
         if c.thumb == nil { requestThumbnail(forDisplayed: indexPath.item) }
         return item
     }
@@ -380,6 +387,8 @@ private final class ImportCandidateItem: NSCollectionViewItem {
     private let check = NSImageView()
     private let importedBadge = NSTextField(labelWithString: "IMPORTED")
     private let rawBadge = NSTextField(labelWithString: "RAW")
+    /// Bottom-right marker for movie ("VIDEO") and Live Photo ("LIVE") candidates.
+    private let typeBadge = NSTextField(labelWithString: "")
 
     override func loadView() {
         let v = NSView()
@@ -437,6 +446,17 @@ private final class ImportCandidateItem: NSCollectionViewItem {
         rawBadge.translatesAutoresizingMaskIntoConstraints = false
         v.addSubview(rawBadge)
 
+        typeBadge.font = PlateFont.mono(8, weight: .semibold)
+        typeBadge.textColor = PlateColor.textPrimary
+        typeBadge.alignment = .center
+        typeBadge.wantsLayer = true
+        typeBadge.drawsBackground = true
+        typeBadge.backgroundColor = NSColor.black.withAlphaComponent(0.55)
+        typeBadge.layer?.cornerRadius = 2
+        typeBadge.isHidden = true
+        typeBadge.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(typeBadge)
+
         NSLayoutConstraint.activate([
             thumb.leadingAnchor.constraint(equalTo: v.leadingAnchor),
             thumb.trailingAnchor.constraint(equalTo: v.trailingAnchor),
@@ -459,6 +479,11 @@ private final class ImportCandidateItem: NSCollectionViewItem {
             rawBadge.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -6),
             rawBadge.heightAnchor.constraint(equalToConstant: 14),
             rawBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 28),
+
+            typeBadge.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -6),
+            typeBadge.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -6),
+            typeBadge.heightAnchor.constraint(equalToConstant: 14),
+            typeBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 28),
         ])
     }
 
@@ -467,11 +492,17 @@ private final class ImportCandidateItem: NSCollectionViewItem {
         dim.frame = view.bounds
     }
 
-    func configure(thumbnail: NSImage?, selected: Bool, alreadyImported: Bool, hasRaw: Bool) {
+    func configure(thumbnail: NSImage?, selected: Bool, alreadyImported: Bool,
+                   hasRaw: Bool, mediaType: MediaType = .image) {
         thumb.image = thumbnail
         dim.isHidden = !alreadyImported
         importedBadge.isHidden = !alreadyImported
         rawBadge.isHidden = !hasRaw
+        switch mediaType {
+        case .image:     typeBadge.isHidden = true
+        case .video:     typeBadge.stringValue = "VIDEO"; typeBadge.isHidden = false
+        case .livePhoto: typeBadge.stringValue = "LIVE";  typeBadge.isHidden = false
+        }
         // Selection check hidden for already-imported tiles (not selectable).
         checkBg.isHidden = alreadyImported || !selected
     }
@@ -482,6 +513,7 @@ private final class ImportCandidateItem: NSCollectionViewItem {
         dim.isHidden = true
         importedBadge.isHidden = true
         rawBadge.isHidden = true
+        typeBadge.isHidden = true
         checkBg.isHidden = true
     }
 }

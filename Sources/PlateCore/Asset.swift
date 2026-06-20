@@ -29,6 +29,20 @@ public struct Asset: Codable, Identifiable, Equatable {
     /// restored (set to nil) or permanently deleted (row removed).
     public var deletedAt: Date?
 
+    // Media type (schema v6). Older assets predate the column and decode as
+    // `.image` (the only kind Plate stored before), so the field is always
+    // present and never optional.
+    /// Still image, standalone video, or Live Photo. Determines how the viewer
+    /// renders the asset and which corner badge the grid shows.
+    public var mediaType: MediaType
+    /// For a Live Photo, the relative path of the paired motion `.mov` companion
+    /// (same basename as `primary`). Nil for stills and standalone videos —
+    /// a video's playable file *is* `primary`.
+    public var motionPath: String?
+    /// Playback duration in seconds for `video` assets (nil for stills; Live
+    /// Photo motion is always ~3s and left nil). Drives the grid's duration pill.
+    public var duration: Double?
+
     // EXIF shooting metadata (schema v5). All optional — older assets imported
     // before v5, and files that carry no EXIF (screenshots, scans, stripped
     // exports), leave these nil. Re-extracted by "Rebuild Library Data".
@@ -63,6 +77,9 @@ public struct Asset: Codable, Identifiable, Equatable {
         contentHash: String? = nil,
         isFavorite: Bool = false,
         deletedAt: Date? = nil,
+        mediaType: MediaType = .image,
+        motionPath: String? = nil,
+        duration: Double? = nil,
         cameraMake: String? = nil,
         cameraModel: String? = nil,
         lensModel: String? = nil,
@@ -84,6 +101,9 @@ public struct Asset: Codable, Identifiable, Equatable {
         self.contentHash = contentHash
         self.isFavorite = isFavorite
         self.deletedAt = deletedAt
+        self.mediaType = mediaType
+        self.motionPath = motionPath
+        self.duration = duration
         self.cameraMake = cameraMake
         self.cameraModel = cameraModel
         self.lensModel = lensModel
@@ -151,6 +171,7 @@ public struct Asset: Codable, Identifiable, Equatable {
         case id, primary, raws, sidecars, capturedAt
         case pixelWidth, pixelHeight, thumbnail, contentHash
         case isFavorite, deletedAt
+        case mediaType, motionPath, duration
         case cameraMake, cameraModel, lensModel, focalLength
         case aperture, shutterSpeed, iso, latitude, longitude
     }
@@ -168,6 +189,9 @@ public struct Asset: Codable, Identifiable, Equatable {
         self.contentHash   = try c.decodeIfPresent(String.self,   forKey: .contentHash)
         self.isFavorite    = try c.decodeIfPresent(Bool.self,     forKey: .isFavorite) ?? false
         self.deletedAt     = try c.decodeIfPresent(Date.self,     forKey: .deletedAt)
+        self.mediaType     = try c.decodeIfPresent(MediaType.self, forKey: .mediaType) ?? .image
+        self.motionPath    = try c.decodeIfPresent(String.self,   forKey: .motionPath)
+        self.duration      = try c.decodeIfPresent(Double.self,   forKey: .duration)
         self.cameraMake    = try c.decodeIfPresent(String.self,   forKey: .cameraMake)
         self.cameraModel   = try c.decodeIfPresent(String.self,   forKey: .cameraModel)
         self.lensModel     = try c.decodeIfPresent(String.self,   forKey: .lensModel)

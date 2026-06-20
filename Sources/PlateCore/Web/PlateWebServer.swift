@@ -16,9 +16,12 @@ import Security
 /// Routes:
 ///   GET /                  → the embedded gallery page (WebFrontend)
 ///   GET /api/assets        → JSON: { library, count, assets:[…] }
-///   GET /thumb/<id>        → import-time 512px JPEG thumbnail
-///   GET /preview/<id>      → ~2048px JPEG rendition (generated + cached)
-///   GET /original/<id>     → the original file, as an attachment download
+///   GET /thumb/<id>        → import-time 512px JPEG thumbnail (video: poster)
+///   GET /preview/<id>      → ~2048px JPEG rendition (generated + cached;
+///                            video falls back to the poster thumbnail)
+///   GET /original/<id>     → the original file (stills: attachment download;
+///                            video: inline, Range-served for <video> playback)
+///   GET /motion/<id>       → a Live Photo's motion .mov, inline (Range-served)
 ///
 /// Everything is read-only: there is no route that mutates the library.
 public final class PlateWebServer {
@@ -298,6 +301,8 @@ public final class PlateWebServer {
                 servePreview(id: id, request: request, on: connection, keepAlive: keepAlive)
             } else if let id = id(in: request.path, after: "/original/") {
                 serveOriginal(id: id, request: request, on: connection, keepAlive: keepAlive)
+            } else if let id = id(in: request.path, after: "/motion/") {
+                serveMotion(id: id, request: request, on: connection, keepAlive: keepAlive)
             } else if let rest = id(in: request.path, after: "/raw/") {
                 serveCompanion(rest, kind: .raw, request: request, on: connection, keepAlive: keepAlive)
             } else if let rest = id(in: request.path, after: "/sidecar/") {
@@ -390,6 +395,11 @@ public final class PlateWebServer {
         let gps: Bool
         let filename: String
         let ext: String
+        /// Media kind: "image" / "video" / "livePhoto". The frontend uses it to
+        /// pick a tile badge and a lightbox renderer (`<img>` vs `<video>`).
+        let kind: String
+        /// Video duration in seconds (null for stills / Live Photos).
+        let duration: Double?
         /// Lower-cased extensions of the RAW companions (e.g. ["3fr"]) and
         /// XMP/AAE sidecars — the frontend turns these into download buttons
         /// addressed by index (`/raw/<id>/<i>`, `/sidecar/<id>/<i>`).
@@ -412,6 +422,8 @@ public final class PlateWebServer {
             gps = (asset.latitude != nil && asset.longitude != nil)
             filename = (asset.primary as NSString).lastPathComponent
             ext = (asset.primary as NSString).pathExtension.lowercased()
+            kind = asset.mediaType.rawValue
+            duration = asset.duration
             raws = asset.raws.map { ($0 as NSString).pathExtension.lowercased() }
             sidecars = asset.sidecars.map { ($0 as NSString).pathExtension.lowercased() }
         }
@@ -478,6 +490,22 @@ public final class PlateWebServer {
             respond(.text("Not Found", status: 404), to: request, on: connection, keepAlive: keepAlive)
             return
         }
+        // Video has no still rendition — its lightbox plays `/original` in a
+        // <video>, and the "preview" is just the poster frame (the import-time
+        // thumbnail). Serve that and skip the ImageIO render attempt entirely.
+        if asset.mediaType == .video {
+            if let thumb = asset.thumbnail {
+                let url = library.absoluteURL(forRelative: thumb)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    sendFile(at: url, contentType: "image/jpeg",
+                             request: request, on: connection, keepAlive: keepAlive)
+                    return
+                }
+            }
+            respond(.text("Preview unavailable", status: 404),
+                    to: request, on: connection, keepAlive: keepAlive)
+            return
+        }
         // A browser-friendly JPEG at a generous size, regardless of whether the
         // original is HEIF / TIFF / RAW (which most browsers can't display).
         if let url = cachedRendition(for: asset, maxPixel: 2048) {
@@ -512,10 +540,33 @@ public final class PlateWebServer {
             return
         }
         let filename = (asset.primary as NSString).lastPathComponent
+        // Videos are served inline (no Content-Disposition) so the lightbox
+        // <video> can play them in place; stills keep the attachment-download
+        // behavior so "Open original" saves the master file as before.
+        let inline = (asset.mediaType == .video)
         sendFile(at: url,
                  contentType: Self.contentType(forExtension: (asset.primary as NSString).pathExtension),
                  request: request, on: connection, keepAlive: keepAlive,
-                 downloadName: filename)
+                 downloadName: inline ? nil : filename)
+    }
+
+    /// Serve a Live Photo's motion `.mov` inline (so the lightbox can play it in
+    /// a <video>). 404 for stills / videos that have no motion companion.
+    private func serveMotion(id: String, request: HTTPRequest,
+                             on connection: NWConnection, keepAlive: Bool) {
+        guard let asset = asset(for: id), let motion = asset.motionPath else {
+            respond(.text("Not Found", status: 404), to: request, on: connection, keepAlive: keepAlive)
+            return
+        }
+        let url = library.absoluteURL(forRelative: motion)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            respond(.text("Motion clip missing on disk", status: 404),
+                    to: request, on: connection, keepAlive: keepAlive)
+            return
+        }
+        sendFile(at: url,
+                 contentType: Self.contentType(forExtension: (motion as NSString).pathExtension),
+                 request: request, on: connection, keepAlive: keepAlive)
     }
 
     private enum CompanionKind { case raw, sidecar }
@@ -603,9 +654,11 @@ public final class PlateWebServer {
         })
     }
 
-    /// Stream a file straight off disk in bounded chunks. `Content-Length` is
-    /// the on-disk size; we don't support range requests (Accept-Ranges: none),
-    /// which a photo gallery never needs.
+    /// Stream a file straight off disk in bounded chunks. Honors a single HTTP
+    /// `Range` request with a `206 Partial Content` response — required for
+    /// `<video>` playback + seeking in Safari, and a nice-to-have for resuming a
+    /// big RAW download. A request with no Range header gets the whole file
+    /// (`200`), but we always advertise `Accept-Ranges: bytes`.
     private func sendFile(at url: URL, contentType: String, request: HTTPRequest,
                           on connection: NWConnection, keepAlive: Bool,
                           downloadName: String? = nil) {
@@ -617,16 +670,30 @@ public final class PlateWebServer {
             return
         }
 
+        // Resolve the byte window: full file by default, or the requested range.
+        var status = 200
+        var start = 0
+        var length = size
+        var rangeHeaders: [(String, String)] = []
+        if let rangeHeader = request.headers["range"],
+           let r = Self.parseByteRange(rangeHeader, fileSize: size) {
+            status = 206
+            start = r.start
+            length = r.length
+            rangeHeaders.append(("Content-Range", "bytes \(r.start)-\(r.end)/\(size)"))
+        }
+
         var headers: [(String, String)] = [
             ("Content-Type", contentType),
-            ("Content-Length", "\(size)"),
-            ("Accept-Ranges", "none"),
+            ("Content-Length", "\(length)"),
+            ("Accept-Ranges", "bytes"),
             ("Cache-Control", "private, max-age=3600"),
         ]
+        headers.append(contentsOf: rangeHeaders)
         if let name = downloadName {
             headers.append(("Content-Disposition", "attachment; filename=\"\(Self.sanitizeFilename(name))\""))
         }
-        let head = HTTPResponse(status: 200, headers: headers, body: nil)
+        let head = HTTPResponse(status: status, headers: headers, body: nil)
             .serializedHead(keepAlive: keepAlive)
 
         if request.method == "HEAD" {
@@ -638,14 +705,28 @@ public final class PlateWebServer {
             return
         }
 
+        // Non-throwing seek keeps us on the 10.15.0 floor (the throwing
+        // `seek(toOffset:)` is 10.15.4+). A no-op when start == 0.
+        if start > 0 { handle.seek(toFileOffset: UInt64(start)) }
+
         connection.send(content: head, completion: .contentProcessed { [weak self] error in
             guard error == nil, let self = self else { try? handle.close(); connection.cancel(); return }
-            self.streamBody(handle: handle, on: connection, keepAlive: keepAlive)
+            self.streamBody(handle: handle, remaining: length, on: connection, keepAlive: keepAlive)
         })
     }
 
-    private func streamBody(handle: FileHandle, on connection: NWConnection, keepAlive: Bool) {
-        let chunk = handle.readData(ofLength: PlateWebServer.streamChunk)
+    /// Stream `remaining` bytes from `handle` in chunks, then finish. `remaining`
+    /// bounds a ranged (206) response to its window; for a whole-file (200) send
+    /// it's the full size and we simply stop at EOF.
+    private func streamBody(handle: FileHandle, remaining: Int,
+                            on connection: NWConnection, keepAlive: Bool) {
+        if remaining <= 0 {
+            try? handle.close()
+            if keepAlive { receiveHead(on: connection, buffer: Data()) }
+            else { connection.cancel() }
+            return
+        }
+        let chunk = handle.readData(ofLength: min(remaining, PlateWebServer.streamChunk))
         if chunk.isEmpty {
             try? handle.close()
             if keepAlive { receiveHead(on: connection, buffer: Data()) }
@@ -654,8 +735,47 @@ public final class PlateWebServer {
         }
         connection.send(content: chunk, completion: .contentProcessed { [weak self] error in
             guard error == nil, let self = self else { try? handle.close(); connection.cancel(); return }
-            self.streamBody(handle: handle, on: connection, keepAlive: keepAlive)
+            self.streamBody(handle: handle, remaining: remaining - chunk.count,
+                            on: connection, keepAlive: keepAlive)
         })
+    }
+
+    /// Parse a single HTTP byte range against a known file size. Supports
+    /// `bytes=START-END`, `bytes=START-` (to EOF), and `bytes=-N` (last N bytes).
+    /// Returns nil for a malformed or unsatisfiable spec (caller falls back to a
+    /// normal 200 full-file send). Only the first range of a comma list is used.
+    static func parseByteRange(_ header: String, fileSize: Int) -> (start: Int, end: Int, length: Int)? {
+        guard fileSize > 0 else { return nil }
+        let lower = header.lowercased()
+        guard lower.hasPrefix("bytes=") else { return nil }
+        let spec = lower.dropFirst("bytes=".count)
+        let firstSpec = spec.split(separator: ",").first.map(String.init) ?? String(spec)
+        let parts = firstSpec.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return nil }
+        let startStr = parts[0].trimmingCharacters(in: .whitespaces)
+        let endStr = parts[1].trimmingCharacters(in: .whitespaces)
+
+        var start: Int
+        var end: Int
+        if startStr.isEmpty {
+            // Suffix range: the last N bytes.
+            guard let n = Int(endStr), n > 0 else { return nil }
+            let count = min(n, fileSize)
+            start = fileSize - count
+            end = fileSize - 1
+        } else {
+            guard let s = Int(startStr), s >= 0 else { return nil }
+            start = s
+            if endStr.isEmpty {
+                end = fileSize - 1
+            } else {
+                guard let e = Int(endStr) else { return nil }
+                end = e
+            }
+        }
+        if end >= fileSize { end = fileSize - 1 }
+        guard start <= end, start < fileSize else { return nil }
+        return (start, end, end - start + 1)
     }
 
     // MARK: - Helpers
@@ -669,6 +789,14 @@ public final class PlateWebServer {
         case "gif":                 return "image/gif"
         case "webp":                return "image/webp"
         case "dng":                 return "image/x-adobe-dng"
+        case "mov":                 return "video/quicktime"
+        case "mp4", "m4v", "hevc":  return "video/mp4"
+        case "avi":                 return "video/x-msvideo"
+        case "mkv":                 return "video/x-matroska"
+        case "webm":                return "video/webm"
+        case "mpg", "mpeg":         return "video/mpeg"
+        case "3gp":                 return "video/3gpp"
+        case "3g2":                 return "video/3gpp2"
         default:                    return "application/octet-stream"
         }
     }

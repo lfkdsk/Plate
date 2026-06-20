@@ -42,7 +42,10 @@ public final class AssetStore {
     /// v5 → adds EXIF shooting-metadata columns (camera_make/model, lens_model,
     ///      focal_length, aperture, shutter_speed, iso, latitude, longitude)
     ///      that power the Statistics view. Backfilled by "Rebuild Library Data".
-    public static let currentSchemaVersion: Int32 = 5
+    /// v6 → adds `media_type` (image/video/livePhoto), `motion_path` (a Live
+    ///      Photo's paired .mov), and `duration` (video length, seconds) so the
+    ///      library can hold movies and Live Photos alongside stills.
+    public static let currentSchemaVersion: Int32 = 6
 
     public init(url: URL) throws {
         self.url = url
@@ -100,6 +103,9 @@ public final class AssetStore {
                     iso           INTEGER,
                     latitude      REAL,
                     longitude     REAL,
+                    media_type    TEXT NOT NULL DEFAULT 'image',
+                    motion_path   TEXT,
+                    duration      REAL,
                     created_at    REAL NOT NULL DEFAULT (julianday('now'))
                 );
                 CREATE INDEX idx_assets_captured     ON assets(captured_at DESC);
@@ -137,15 +143,21 @@ public final class AssetStore {
             try migrateV2toV3()
             try migrateV3toV4()
             try migrateV4toV5()
+            try migrateV5toV6()
         } else if existing == 2 {
             try migrateV2toV3()
             try migrateV3toV4()
             try migrateV4toV5()
+            try migrateV5toV6()
         } else if existing == 3 {
             try migrateV3toV4()
             try migrateV4toV5()
+            try migrateV5toV6()
         } else if existing == 4 {
             try migrateV4toV5()
+            try migrateV5toV6()
+        } else if existing == 5 {
+            try migrateV5toV6()
         } else if existing == Self.currentSchemaVersion {
             // Up to date.
         } else {
@@ -225,6 +237,18 @@ public final class AssetStore {
         try exec("ALTER TABLE assets ADD COLUMN latitude      REAL;")
         try exec("ALTER TABLE assets ADD COLUMN longitude     REAL;")
         try exec("PRAGMA user_version = 5;")
+    }
+
+    private func migrateV5toV6() throws {
+        // v5 → v6: media-type columns. Existing rows are all stills, so the
+        // NOT NULL DEFAULT 'image' backfills them correctly; motion_path /
+        // duration stay NULL (no Live Photos or videos predate this column).
+        // One ADD COLUMN per statement — older macOS SQLite rejects multiple
+        // ADD COLUMN clauses in a single ALTER.
+        try exec("ALTER TABLE assets ADD COLUMN media_type  TEXT NOT NULL DEFAULT 'image';")
+        try exec("ALTER TABLE assets ADD COLUMN motion_path TEXT;")
+        try exec("ALTER TABLE assets ADD COLUMN duration    REAL;")
+        try exec("PRAGMA user_version = 6;")
     }
 
     private func readUserVersion() -> Int32 {
@@ -379,7 +403,8 @@ public final class AssetStore {
                                     shutterSpeed: Double?,
                                     iso: Int?,
                                     latitude: Double?,
-                                    longitude: Double?) throws {
+                                    longitude: Double?,
+                                    duration: Double?) throws {
         try queue.sync {
             var stmt: OpaquePointer?
             try prepare("""
@@ -397,7 +422,8 @@ public final class AssetStore {
                        shutter_speed = ?,
                        iso = ?,
                        latitude = ?,
-                       longitude = ?
+                       longitude = ?,
+                       duration = ?
                  WHERE id = ?;
                 """, &stmt)
             defer { sqlite3_finalize(stmt) }
@@ -427,7 +453,8 @@ public final class AssetStore {
             try bindOptionalInt(stmt, 12, iso)
             try bindOptionalDouble(stmt, 13, latitude)
             try bindOptionalDouble(stmt, 14, longitude)
-            try bindUUID(stmt, 15, id)
+            try bindOptionalDouble(stmt, 15, duration)
+            try bindUUID(stmt, 16, id)
             guard sqlite3_step(stmt) == SQLITE_DONE else {
                 throw StoreError.step(lastError())
             }
@@ -842,7 +869,8 @@ public final class AssetStore {
                captured_at, pixel_width, pixel_height, thumbnail,
                content_hash, is_favorite, deleted_at,
                camera_make, camera_model, lens_model, focal_length,
-               aperture, shutter_speed, iso, latitude, longitude
+               aperture, shutter_speed, iso, latitude, longitude,
+               media_type, motion_path, duration
         """
 
     private func insertLocked(_ asset: Asset) throws {
@@ -852,8 +880,9 @@ public final class AssetStore {
                                 captured_at, pixel_width, pixel_height, thumbnail,
                                 content_hash, is_favorite, deleted_at,
                                 camera_make, camera_model, lens_model, focal_length,
-                                aperture, shutter_speed, iso, latitude, longitude)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                                aperture, shutter_speed, iso, latitude, longitude,
+                                media_type, motion_path, duration)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, &stmt)
         defer { sqlite3_finalize(stmt) }
 
@@ -893,6 +922,9 @@ public final class AssetStore {
         try bindOptionalInt(stmt, 18, asset.iso)
         try bindOptionalDouble(stmt, 19, asset.latitude)
         try bindOptionalDouble(stmt, 20, asset.longitude)
+        try bindText(stmt, 21, asset.mediaType.rawValue)
+        try bindOptionalText(stmt, 22, asset.motionPath)
+        try bindOptionalDouble(stmt, 23, asset.duration)
 
         let step = sqlite3_step(stmt)
         guard step == SQLITE_DONE else {
@@ -946,6 +978,10 @@ public final class AssetStore {
         let latitude     = columnDouble(stmt, 18)
         let longitude    = columnDouble(stmt, 19)
 
+        let mediaType  = MediaType(storedValue: columnText(stmt, 20))
+        let motionPath = columnText(stmt, 21)
+        let duration   = columnDouble(stmt, 22)
+
         return Asset(id: id,
                      primary: primary,
                      raws: raws,
@@ -957,6 +993,9 @@ public final class AssetStore {
                      contentHash: contentHash,
                      isFavorite: isFavorite,
                      deletedAt: deletedAt,
+                     mediaType: mediaType,
+                     motionPath: motionPath,
+                     duration: duration,
                      cameraMake: cameraMake,
                      cameraModel: cameraModel,
                      lensModel: lensModel,
