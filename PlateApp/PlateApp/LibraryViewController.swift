@@ -31,6 +31,8 @@ final class LibraryViewController: NSViewController,
     enum Source: Equatable, Hashable {
         case library
         case favorites
+        /// All video assets — a built-in "smart" source backed by a media-type filter.
+        case videos
         case recentlyDeleted
         case album(id: UUID, name: String)
     }
@@ -233,6 +235,7 @@ final class LibraryViewController: NSViewController,
         switch source {
         case .library:         base = lib.assets
         case .favorites:       base = lib.favoriteAssets
+        case .videos:          base = lib.assets(matching: SmartFilter(rules: [.mediaType(.video)]))
         case .recentlyDeleted: base = lib.recentlyDeletedAssets
         case .album(let id, _): base = lib.assetsInAlbum(id: id)
         }
@@ -909,6 +912,13 @@ final class LibraryViewController: NSViewController,
 
     func importURLs(_ urls: [URL]) {
         guard let lib = library, !urls.isEmpty else { return }
+        // Dropping onto an album view files the imports straight into that album.
+        // Captured now (drop time) so switching the sidebar mid-import can't
+        // retarget where they land.
+        let targetAlbumID: UUID? = {
+            if case .album(let id, _) = source { return id }
+            return nil
+        }()
         // Skip anything that IS or IS INSIDE this library bundle. Without the
         // equality check, dragging the document proxy icon (or the bundle
         // itself from Finder) onto our own window would re-import every
@@ -945,6 +955,14 @@ final class LibraryViewController: NSViewController,
                     DispatchQueue.main.async {
                         self?.onImportPhase?(.progress(completed: completed, total: total))
                     }
+                }
+                // File the drop into the album it landed on. Both the freshly
+                // imported assets and any that were already in the library
+                // (deduped) join the album — dropping a photo onto an album
+                // should put it there regardless of whether it's new.
+                if let albumID = targetAlbumID {
+                    let toAdd = result.imported + result.duplicates.map(\.existing)
+                    if !toAdd.isEmpty { try lib.addAssets(toAdd, toAlbum: albumID) }
                 }
                 if !result.failures.isEmpty || !result.duplicates.isEmpty {
                     let snapshot = result
