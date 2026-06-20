@@ -30,6 +30,12 @@ final class DetailViewController: NSViewController {
     /// still is pinch-to-zoomable exactly like a regular photo; the motion still
     /// plays (auto on open, or by hovering the badge).
     private var livePhotoScrollView: NSScrollView?
+    /// Our own "LIVE" badge, pinned top-right at a fixed size. PHLivePhotoView's
+    /// built-in badge sits *inside* the zoom scroll view and shrinks with the
+    /// fit magnification (tiny, bottom-left), so we hide that and draw this.
+    /// Click it to replay the motion.
+    private let liveBadge = NSView()
+    private let liveBadgeLabel = NSTextField(labelWithString: "")
 
     /// Which surface is currently front-most. Drives `setMediaMode` show/hide.
     private enum MediaMode { case image, video, livePhoto }
@@ -263,6 +269,43 @@ final class DetailViewController: NSViewController {
             strip.heightAnchor.constraint(equalToConstant: 64),
         ])
 
+        // Fixed-size LIVE badge (top-right). Added above the media surfaces but
+        // below the auto-hiding chrome so it stays put and visible; click to
+        // replay the motion. Shown only for Live Photos (see setMediaMode).
+        liveBadge.wantsLayer = true
+        liveBadge.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        liveBadge.layer?.cornerRadius = 6
+        liveBadge.isHidden = true
+        liveBadge.translatesAutoresizingMaskIntoConstraints = false
+        liveBadge.shadow = {
+            let s = NSShadow()
+            s.shadowColor = NSColor.black.withAlphaComponent(0.5)
+            s.shadowBlurRadius = 5
+            s.shadowOffset = NSSize(width: 0, height: -1)
+            return s
+        }()
+        let liveAttr = NSMutableAttributedString(string: "◉ LIVE")
+        liveAttr.addAttributes([
+            .font: PlateFont.mono(13, weight: .semibold),
+            .foregroundColor: PlateColor.textPrimary,
+            .kern: 1.0,
+        ], range: NSRange(location: 0, length: liveAttr.length))
+        liveBadgeLabel.attributedStringValue = liveAttr
+        liveBadgeLabel.alignment = .center
+        liveBadgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        liveBadge.addSubview(liveBadgeLabel)
+        v.addSubview(liveBadge, positioned: .below, relativeTo: chrome)
+        liveBadge.addGestureRecognizer(
+            NSClickGestureRecognizer(target: self, action: #selector(replayLiveMotion)))
+        NSLayoutConstraint.activate([
+            liveBadge.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            liveBadge.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
+            liveBadgeLabel.leadingAnchor.constraint(equalTo: liveBadge.leadingAnchor, constant: 11),
+            liveBadgeLabel.trailingAnchor.constraint(equalTo: liveBadge.trailingAnchor, constant: -11),
+            liveBadgeLabel.topAnchor.constraint(equalTo: liveBadge.topAnchor, constant: 5),
+            liveBadgeLabel.bottomAnchor.constraint(equalTo: liveBadge.bottomAnchor, constant: -5),
+        ])
+
         loadCurrent()
 
         NotificationCenter.default.addObserver(
@@ -271,6 +314,11 @@ final class DetailViewController: NSViewController {
             name: NSScrollView.didEndLiveMagnifyNotification,
             object: imageScrollView
         )
+    }
+
+    /// Replay the Live Photo motion — fired by clicking the LIVE badge.
+    @objc private func replayLiveMotion() {
+        livePhotoView?.startPlayback(with: .full)
     }
 
     deinit {
@@ -383,6 +431,7 @@ final class DetailViewController: NSViewController {
         imageScrollView.isHidden     = (mode != .image)
         playerView?.isHidden         = (mode != .video)
         livePhotoScrollView?.isHidden = (mode != .livePhoto)
+        liveBadge.isHidden           = (mode != .livePhoto)
     }
 
     /// Pause + release the active player / Live Photo. Safe to call when nothing
@@ -449,6 +498,9 @@ final class DetailViewController: NSViewController {
                       self.loadGeneration == generation,
                       let livePhoto = livePhoto else { return }
                 lpv.livePhoto = livePhoto
+                // Hide the framework badge (it scales with the zoom scroll view);
+                // our fixed top-right `liveBadge` stands in for it.
+                lpv.livePhotoBadgeView?.isHidden = true
                 self.applyLivePhotoLayout(asset: asset)
                 let degraded = (info[PHLivePhotoInfoIsDegradedKey] as? NSNumber)?.boolValue ?? false
                 if !degraded {
