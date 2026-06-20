@@ -71,6 +71,8 @@ public struct SmartFilter: Equatable {
         case isFavorite(Bool)
         case hasRaw(Bool)
         case hasGPS(Bool)
+        /// Restrict to one media kind — photo / video / Live Photo.
+        case mediaType(MediaType)
     }
 
     // MARK: - Compiled output
@@ -143,6 +145,8 @@ public struct SmartFilter: Equatable {
             return on
                 ? ("latitude IS NOT NULL AND longitude IS NOT NULL", [])
                 : ("latitude IS NULL OR longitude IS NULL", [])
+        case .mediaType(let t):
+            return ("media_type = ?", [.text(t.rawValue)])
         }
     }
 

@@ -30,6 +30,7 @@ final class SidebarViewController: NSViewController {
     private let photosHeader = SidebarItem(title: "Photos", children: [
         SidebarItem(title: "Library",           icon: "photo.on.rectangle.angled", source: .library),
         SidebarItem(title: "Favorites",         icon: "heart",                     source: .favorites),
+        SidebarItem(title: "Videos",            icon: "video",                     source: .videos),
         SidebarItem(title: "Recently Deleted",  icon: "trash",                     source: .recentlyDeleted),
     ])
     private let albumsHeader = SidebarItem(title: "Albums", children: [])

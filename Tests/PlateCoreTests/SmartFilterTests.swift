@@ -54,6 +54,15 @@ final class SmartFilterTests: XCTestCase {
         XCTAssertTrue(SmartFilter(rules: [.hasRaw(true)]).compile(calendar: cal).bindings.isEmpty)
     }
 
+    func testMediaTypeRuleBindsRawValue() {
+        let v = SmartFilter(rules: [.mediaType(.video)]).compile(calendar: cal)
+        XCTAssertEqual(v.whereSQL, "((media_type = ?))")
+        XCTAssertEqual(v.bindings, [.text("video")])
+
+        let live = SmartFilter(rules: [.mediaType(.livePhoto)]).compile(calendar: cal)
+        XCTAssertEqual(live.bindings, [.text("livePhoto")])
+    }
+
     func testYearExpandsToHalfOpenRange() {
         let c = SmartFilter(rules: [.captured(.year(2024))]).compile(calendar: cal)
         XCTAssertEqual(c.whereSQL, "((captured_at >= ? AND captured_at < ?))")
@@ -143,6 +152,30 @@ final class SmartFilterTests: XCTestCase {
         // Distinct helpers.
         XCTAssertEqual(reopened.distinctCameras, ["ILCE-7M4", "iPhone 15 Pro", "X2D 100C"])
         XCTAssertEqual(reopened.distinctCaptureYears, [2024, 2023])
+    }
+
+    func testMediaTypeFilterAgainstStore() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SmartFilterMedia-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let lib = try PlateLibrary.create(at: root.appendingPathComponent("M.plate"))
+        let direct = try AssetStore(url: lib.databaseURL)
+        try direct.insert(Asset(primary: "m/photo.HEIC", mediaType: .image))
+        try direct.insert(Asset(primary: "m/clip.MOV", mediaType: .video, duration: 5))
+        try direct.insert(Asset(primary: "m/live.HEIC",
+                                mediaType: .livePhoto, motionPath: "m/live.MOV"))
+
+        let reopened = try PlateLibrary.open(at: lib.url)
+        XCTAssertEqual(reopened.assets(matching: SmartFilter(rules: [.mediaType(.video)])).map(\.primary),
+                       ["m/clip.MOV"])
+        XCTAssertEqual(reopened.assets(matching: SmartFilter(rules: [.mediaType(.livePhoto)])).map(\.primary),
+                       ["m/live.HEIC"])
+        XCTAssertEqual(reopened.assets(matching: SmartFilter(rules: [.mediaType(.image)])).map(\.primary),
+                       ["m/photo.HEIC"])
+        // No filter → all three kinds present.
+        XCTAssertEqual(reopened.assets(matching: SmartFilter()).count, 3)
     }
 
     private func date(_ y: Int, _ m: Int, _ d: Int) -> Date {

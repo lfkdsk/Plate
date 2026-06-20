@@ -23,11 +23,17 @@ final class FilterPopoverViewController: NSViewController {
     private let favoritesCheck = NSButton(checkboxWithTitle: "Favorites", target: nil, action: nil)
     private let rawCheck = NSButton(checkboxWithTitle: "Has RAW", target: nil, action: nil)
     private let gpsCheck = NSButton(checkboxWithTitle: "Geotagged", target: nil, action: nil)
+    private let mediaPopup = NSPopUpButton()
     private let cameraPopup = NSPopUpButton()
     private let lensPopup = NSPopUpButton()
     private let yearPopup = NSPopUpButton()
     private let isoPopup = NSPopUpButton()
     private let aperturePopup = NSPopUpButton()
+
+    // Media-kind presets: display title → rule value (nil = "Any", no rule).
+    private let mediaPresets: [(String, MediaType?)] = [
+        ("Any", nil), ("Photos", .image), ("Videos", .video), ("Live Photos", .livePhoto),
+    ]
 
     // Numeric presets: display title → rule value (nil = "Any", no rule).
     private let isoPresets: [(String, Double?)] = [
@@ -49,7 +55,9 @@ final class FilterPopoverViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 430))
+        // Width holds the label column (92) + spacing + a fixed 200pt popup,
+        // plus the stack's 16pt side insets. Height fits the rows snugly.
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 444))
         view = root
 
         matchControl.selectedSegment = 0
@@ -61,6 +69,7 @@ final class FilterPopoverViewController: NSViewController {
             check.action = #selector(controlChanged)
         }
 
+        configurePopup(mediaPopup, title: "Media", items: mediaPresets.map(\.0))
         configurePopup(cameraPopup, title: "Camera",
                        items: ["Any Camera"] + cameras)
         configurePopup(lensPopup, title: "Lens",
@@ -81,6 +90,7 @@ final class FilterPopoverViewController: NSViewController {
             spacer(4),
             favoritesCheck, rawCheck, gpsCheck,
             spacer(4),
+            labeledRow("Media", mediaPopup),
             labeledRow("Camera", cameraPopup),
             labeledRow("Lens", lensPopup),
             labeledRow("Year", yearPopup),
@@ -121,6 +131,9 @@ final class FilterPopoverViewController: NSViewController {
         if favoritesCheck.state == .on { rules.append(.isFavorite(true)) }
         if rawCheck.state == .on { rules.append(.hasRaw(true)) }
         if gpsCheck.state == .on { rules.append(.hasGPS(true)) }
+        if let media = mediaPresets[safe: mediaPopup.indexOfSelectedItem]?.1 {
+            rules.append(.mediaType(media))
+        }
         if cameraPopup.indexOfSelectedItem > 0 {
             rules.append(.camera(.is(cameras[cameraPopup.indexOfSelectedItem - 1])))
         }
@@ -147,6 +160,7 @@ final class FilterPopoverViewController: NSViewController {
         favoritesCheck.state = .off
         rawCheck.state = .off
         gpsCheck.state = .off
+        mediaPopup.selectItem(at: 0)
         cameraPopup.selectItem(at: 0)
         lensPopup.selectItem(at: 0)
         yearPopup.selectItem(at: 0)
@@ -168,6 +182,8 @@ final class FilterPopoverViewController: NSViewController {
                 if let i = isoPresets.firstIndex(where: { $0.1 == v }) { isoPopup.selectItem(at: i) }
             case .aperture(.atMost(let v)):
                 if let i = aperturePresets.firstIndex(where: { $0.1 == v }) { aperturePopup.selectItem(at: i) }
+            case .mediaType(let t):
+                if let i = mediaPresets.firstIndex(where: { $0.1 == t }) { mediaPopup.selectItem(at: i) }
             default:
                 break
             }
@@ -181,8 +197,15 @@ final class FilterPopoverViewController: NSViewController {
         popup.addItems(withTitles: items)
         popup.target = self
         popup.action = #selector(controlChanged)
+        // Truncate an over-long selected title (e.g. a verbose lens name) inside
+        // the button rather than letting the popup's intrinsic width balloon and
+        // stretch the whole popover. The dropdown still lists full names.
+        (popup.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingTail
         popup.translatesAutoresizingMaskIntoConstraints = false
-        popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        // Fixed width so every row aligns and long content can't blow out the
+        // layout (was greaterThanOrEqual → unbounded growth, the cause of the
+        // popover stretching ~3× wide when a long lens name was present).
+        popup.widthAnchor.constraint(equalToConstant: 200).isActive = true
     }
 
     private func sectionLabel(_ text: String) -> NSTextField {

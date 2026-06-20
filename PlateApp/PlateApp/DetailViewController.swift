@@ -26,6 +26,10 @@ final class DetailViewController: NSViewController {
     private var playerView: AVPlayerView?
     private var player: AVPlayer?
     private var livePhotoView: PHLivePhotoView?
+    /// The Live Photo view lives inside its own magnifying scroll view so the
+    /// still is pinch-to-zoomable exactly like a regular photo; the motion still
+    /// plays (auto on open, or by hovering the badge).
+    private var livePhotoScrollView: NSScrollView?
 
     /// Which surface is currently front-most. Drives `setMediaMode` show/hide.
     private enum MediaMode { case image, video, livePhoto }
@@ -376,9 +380,9 @@ final class DetailViewController: NSViewController {
 
     /// Show / hide the three content surfaces so exactly one is front-most.
     private func setMediaMode(_ mode: MediaMode) {
-        imageScrollView.isHidden = (mode != .image)
-        playerView?.isHidden     = (mode != .video)
-        livePhotoView?.isHidden  = (mode != .livePhoto)
+        imageScrollView.isHidden     = (mode != .image)
+        playerView?.isHidden         = (mode != .video)
+        livePhotoScrollView?.isHidden = (mode != .livePhoto)
     }
 
     /// Pause + release the active player / Live Photo. Safe to call when nothing
@@ -445,8 +449,18 @@ final class DetailViewController: NSViewController {
                       self.loadGeneration == generation,
                       let livePhoto = livePhoto else { return }
                 lpv.livePhoto = livePhoto
+                self.applyLivePhotoLayout(asset: asset)
                 let degraded = (info[PHLivePhotoInfoIsDegradedKey] as? NSNumber)?.boolValue ?? false
-                if !degraded { lpv.startPlayback(with: .full) }
+                if !degraded {
+                    // Defer auto-play briefly so the still renders first. Starting
+                    // immediately races the view's initial layout — the short
+                    // motion would play before anything is on screen, so the user
+                    // would only ever see the still (and think it never played).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                        guard let self = self, self.loadGeneration == generation else { return }
+                        lpv.startPlayback(with: .full)
+                    }
+                }
             }
         }
     }
@@ -475,35 +489,68 @@ final class DetailViewController: NSViewController {
         if let lpv = livePhotoView { return lpv }
         let lpv = PHLivePhotoView()
         lpv.contentMode = .aspectFit
-        lpv.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(lpv, positioned: .below, relativeTo: chrome)
+
+        // Same magnify-to-zoom setup as the still image path: the PHLivePhotoView
+        // is the documentView (sized to the still's pixels in showLivePhoto), and
+        // magnification == "fit to window". Native trackpad pinch / two-finger pan.
+        let scroll = NSScrollView()
+        let clip = CenteringClipView()
+        clip.drawsBackground = false
+        scroll.contentView = clip
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 0.01   // recomputed per asset in fitLivePhotoToView
+        scroll.maxMagnification = 6.0
+        scroll.usesPredominantAxisScrolling = false
+        scroll.documentView = lpv
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scroll, positioned: .below, relativeTo: chrome)
         NSLayoutConstraint.activate([
-            lpv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            lpv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            lpv.topAnchor.constraint(equalTo: view.topAnchor),
-            lpv.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: view.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         livePhotoView = lpv
+        livePhotoScrollView = scroll
         return lpv
     }
 
-    /// Space-bar behavior for the current asset: play/pause a video, replay a
-    /// Live Photo's motion. Returns false for stills so the caller falls back to
-    /// the historical "Space closes the viewer".
+    /// Size the Live Photo documentView to the still's pixel dimensions, then
+    /// fit it to the window. Mirrors `applyImage` / `fitImageToView` for stills.
+    private func applyLivePhotoLayout(asset: Asset) {
+        guard let lpv = livePhotoView else { return }
+        let w = asset.pixelWidth ?? Int(view.bounds.width.rounded())
+        let h = asset.pixelHeight ?? Int(view.bounds.height.rounded())
+        lpv.frame = NSRect(x: 0, y: 0, width: max(1, w), height: max(1, h))
+        fitLivePhotoToView()
+    }
+
+    private func fitLivePhotoToView() {
+        guard let scroll = livePhotoScrollView, let lpv = livePhotoView else { return }
+        let scrollSize = scroll.frame.size
+        let imgSize = lpv.frame.size
+        guard imgSize.width > 0, imgSize.height > 0,
+              scrollSize.width > 0, scrollSize.height > 0 else { return }
+        let fit = min(scrollSize.width / imgSize.width, scrollSize.height / imgSize.height)
+        scroll.minMagnification = fit
+        scroll.maxMagnification = max(fit * 6.0, fit + 0.01)
+        scroll.magnification = fit
+    }
+
+    /// Space-bar behavior: only a video claims Space (play/pause). Stills AND
+    /// Live Photos return false so Space falls through to the established "close
+    /// the viewer" dismiss — replaying a Live Photo's motion is done by hovering
+    /// its badge, not by Space (which users expect to take them back to the grid).
     private func handleSpaceForMedia() -> Bool {
-        guard currentIndex >= 0, currentIndex < assets.count else { return false }
-        switch assets[currentIndex].mediaType {
-        case .video:
-            if let player = player {
-                if player.rate == 0 { player.play() } else { player.pause() }
-            }
-            return true
-        case .livePhoto:
-            livePhotoView?.startPlayback(with: .full)
-            return true
-        case .image:
-            return false
-        }
+        guard currentIndex >= 0, currentIndex < assets.count,
+              assets[currentIndex].mediaType == .video,
+              let player = player else { return false }
+        if player.rate == 0 { player.play() } else { player.pause() }
+        return true
     }
 
     /// Drop a short CATransition on the imageView before swapping its image.
@@ -664,6 +711,11 @@ final class DetailViewController: NSViewController {
         // Refit on resize *only* if user hasn't zoomed in (preserve their pan/zoom).
         if abs(imageScrollView.magnification - imageScrollView.minMagnification) < 0.001 {
             fitImageToView()
+        }
+        // Same for the Live Photo surface when it's the visible one.
+        if let scroll = livePhotoScrollView, !scroll.isHidden,
+           abs(scroll.magnification - scroll.minMagnification) < 0.001 {
+            fitLivePhotoToView()
         }
     }
 
