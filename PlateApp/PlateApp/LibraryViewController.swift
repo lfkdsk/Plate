@@ -192,6 +192,22 @@ final class LibraryViewController: NSViewController,
         emptyLabel.isHidden = !assets.isEmpty
     }
 
+    /// Reload from the DB while keeping the user's scroll position. Used when
+    /// returning from the detail viewer after a favorite change: a plain
+    /// `reload()` calls `reloadData()`, which snaps the grid back to the top.
+    /// Favoriting doesn't change item layout, so the saved offset maps back
+    /// exactly; clamping covers the Favorites source, where un-favoriting
+    /// removes a tile and shortens the content.
+    func reloadPreservingScroll() {
+        let clip = scrollView.contentView
+        let savedOrigin = clip.bounds.origin
+        reload()
+        collectionView.layoutSubtreeIfNeeded()
+        let maxY = max(0, collectionView.frame.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: savedOrigin.x, y: min(savedOrigin.y, maxY)))
+        scrollView.reflectScrolledClipView(clip)
+    }
+
     /// Switch the asset source (sidebar selection). Resets the display mode
     /// to All Photos so the new source opens in the most direct view.
     func setSource(_ newSource: Source) {
@@ -285,6 +301,15 @@ final class LibraryViewController: NSViewController,
             // File ▸ Export Originals (with RAW)… — only when the selection
             // actually carries a RAW or sidecar to bring along.
             return currentSelectedAssets().contains { !$0.raws.isEmpty || !$0.sidecars.isEmpty }
+        case #selector(toggleFavorite(_:)):
+            // Image ▸ Favorite / ".". Enabled only with a grid selection; the
+            // title shows "Unfavorite" when everything selected is already a
+            // favorite. While a text field edits it owns the responder chain, so
+            // return false to let "." type instead of toggling.
+            if view.window?.firstResponder is NSText { return false }
+            let sel = currentSelectedAssets()
+            menuItem.title = (!sel.isEmpty && sel.allSatisfy { $0.isFavorite }) ? "Unfavorite" : "Favorite"
+            return !sel.isEmpty
         case Selector(("undo:")):
             // Mirror the manager's state into the Edit ▸ Undo item ("Undo
             // Favorite", etc.). When a text field is editing, its field editor
@@ -580,6 +605,18 @@ final class LibraryViewController: NSViewController,
         reload()
     }
 
+    /// Favorite/unfavorite a single asset through the standard grid path — DB
+    /// write, undo registration, reload — exposed so the window controller can
+    /// replay a detail-viewer favorite for ⌘Z. The caller's undo handler
+    /// captures `asset` by value, so it still resolves even if the grid later
+    /// drops the row (e.g. un-favoriting inside the Favorites source).
+    /// `oldStates` is `!isFavorite`: favoriting is a boolean toggle, so the
+    /// previous value is always the inverse.
+    func favoriteAsset(_ asset: Asset, isFavorite: Bool, actionName: String) {
+        applyFavorite(assets: [asset], newStates: [isFavorite],
+                      oldStates: [!isFavorite], actionName: actionName)
+    }
+
     /// Add or remove album membership and register the inverse (add ⇄ remove).
     private func applyAlbumMembership(assets: [Asset], albumID: UUID, add: Bool, actionName: String) {
         guard let lib = library, !assets.isEmpty else { return }
@@ -628,6 +665,11 @@ final class LibraryViewController: NSViewController,
                       oldStates: selected.map { $0.isFavorite },
                       actionName: target ? "Favorite" : "Remove from Favorites")
     }
+
+    /// Image ▸ Favorite / "." for the grid. Shares the menu command selector
+    /// with the detail viewer (the responder chain routes it to whichever is
+    /// active); same behavior as the right-click Favorite entry point.
+    @objc func toggleFavorite(_ sender: Any?) { toggleFavoriteFromMenu(sender) }
 
     @objc private func addToAlbumFromMenu(_ sender: Any?) {
         guard let menuItem = sender as? NSMenuItem,

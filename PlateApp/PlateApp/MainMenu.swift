@@ -6,6 +6,7 @@ enum MainMenu {
         main.addItem(appMenu())
         main.addItem(fileMenu())
         main.addItem(editMenu())
+        main.addItem(imageMenu())
         main.addItem(viewMenu())
         main.addItem(shareMenu())
         main.addItem(windowMenu())
@@ -127,6 +128,25 @@ enum MainMenu {
         menu.addItem(.init(title: "Select All",
                            action: #selector(NSResponder.selectAll(_:)),
                            keyEquivalent: "a"))
+        item.submenu = menu
+        return item
+    }
+
+    private static func imageMenu() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Image")
+        // Favorite — Apple Photos uses a bare "." (⌘. is "Cancel" by
+        // convention, so no modifier). Routed through the responder chain:
+        // DetailViewController and LibraryViewController both implement
+        // toggleFavorite(_:), so it lands on the detail viewer's current photo
+        // or the grid selection, whichever is active. Each one's
+        // validateMenuItem flips the title to Favorite / Unfavorite and disables
+        // it (so "." types normally) when there's nothing to act on.
+        let favorite = NSMenuItem(title: "Favorite",
+                                  action: #selector(DetailViewController.toggleFavorite(_:)),
+                                  keyEquivalent: ".")
+        favorite.keyEquivalentModifierMask = []
+        menu.addItem(favorite)
         item.submenu = menu
         return item
     }

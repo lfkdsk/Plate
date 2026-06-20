@@ -351,6 +351,9 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
             assets: vc.assets,
             startIndex: index
         ) { [weak self] in self?.exitDetail() }
+        detail.onToggleFavorite = { [weak self] asset, newValue in
+            self?.registerDetailFavoriteUndo(asset, newValue: newValue)
+        }
         detailViewController = detail
         window.toolbar?.isVisible = false
         // System titlebar text would otherwise show through our custom overlay
@@ -367,8 +370,29 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         window.makeFirstResponder(detail)
     }
 
+    /// Register the inverse of a favorite the detail viewer just wrote to the
+    /// DB. The viewer is transient (gone on close) and the grid's own undo
+    /// manager is nil while its view is off-window, so neither can own this —
+    /// the window controller, which outlives both, does. We target the grid VC
+    /// (persistent, and not the owner of this manager, so no retain cycle); its
+    /// `favoriteAsset` reverts via the normal path (DB write + redo + reload).
+    /// If the viewer is still up when ⌘Z fires, we also refresh its heart.
+    private func registerDetailFavoriteUndo(_ asset: Asset, newValue: Bool) {
+        guard let grid = libraryViewController else { return }
+        let actionName = newValue ? "Favorite" : "Remove from Favorites"
+        libraryUndoManager.registerUndo(withTarget: grid) { [weak self] grid in
+            grid.favoriteAsset(asset, isFavorite: !newValue, actionName: actionName)
+            self?.detailViewController?.reflectFavorite(assetID: asset.id, isFavorite: !newValue)
+        }
+        libraryUndoManager.setActionName(actionName)
+    }
+
     private func exitDetail() {
         guard let split = splitViewController, let window = window else { return }
+        // The grid holds a value-type snapshot taken when detail opened, so a
+        // favorite toggled in the viewer isn't reflected there. Re-pull from the
+        // DB on the way out (keeping scroll) when the viewer changed anything.
+        let gridNeedsRefresh = detailViewController?.didMutateLibrary ?? false
         let savedFrame = window.frame
         Self.applyContentTransition(on: window, duration: 0.22)
         // Restore the sidebar+library split as the window's content — the
@@ -379,6 +403,7 @@ final class LibraryWindowController: NSWindowController, NSToolbarDelegate, NSMe
         window.titleVisibility = .visible
         // Proxy icon stays hidden in the library window too (see init).
         detailViewController = nil
+        if gridNeedsRefresh { libraryViewController?.reloadPreservingScroll() }
     }
 
     /// Drop a CATransition on the window's content layer just before swapping

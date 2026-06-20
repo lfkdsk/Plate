@@ -13,6 +13,19 @@ final class DetailViewController: NSViewController {
     private var currentIndex: Int
     private let onClose: () -> Void
 
+    /// Set once this viewer writes any change to the library (favorites). The
+    /// grid holds a value-type snapshot taken when detail opened and can't see
+    /// DB writes made here, so the window controller reads this on exit to know
+    /// whether the grid needs a refresh.
+    private(set) var didMutateLibrary = false
+
+    /// Called after this viewer favorites an asset (the DB is already written),
+    /// so the owner can register the matching undo. It can't live on this
+    /// viewer (torn down on close) nor on the grid (whose undo manager is nil
+    /// while its view is swapped off-window) — only the window controller
+    /// outlives both. Passes the asset and its new favorite state.
+    var onToggleFavorite: ((Asset, Bool) -> Void)?
+
     private let imageView = NonGreedyImageView()
     private let imageScrollView = NSScrollView()
     /// Whole-window overlay holding the floating buttons / caption / strip.
@@ -547,7 +560,11 @@ final class DetailViewController: NSViewController {
         // Update our local mirror so the heart icon and the photo's badge in
         // the filmstrip stay consistent without a full reload.
         assets[currentIndex].isFavorite = newValue
+        didMutateLibrary = true
         refreshFavoriteIcon()
+        // Let the owner register undo on the window's undo manager so ⌘Z
+        // reverts this favorite just like one tapped in the grid.
+        onToggleFavorite?(assets[currentIndex], newValue)
     }
 
     private func refreshFavoriteIcon() {
@@ -555,6 +572,26 @@ final class DetailViewController: NSViewController {
         let isFav = assets[currentIndex].isFavorite
         favoriteButton.setSymbol(isFav ? "heart.fill" : "heart",
                                  tint: isFav ? PlateColor.accent : nil)
+    }
+
+    /// Reflect a favorite change made to one of our assets from outside this
+    /// viewer — an undo/redo routed through the library while the viewer is
+    /// still up — so the heart icon matches the DB without re-navigating.
+    func reflectFavorite(assetID: UUID, isFavorite: Bool) {
+        guard let idx = assets.firstIndex(where: { $0.id == assetID }) else { return }
+        assets[idx].isFavorite = isFavorite
+        if idx == currentIndex { refreshFavoriteIcon() }
+    }
+
+    /// Image ▸ Favorite / "." validation while the viewer is up: keep it enabled
+    /// as long as a photo is on screen and flip the title to match the heart.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleFavorite(_:)) {
+            let hasAsset = currentIndex >= 0 && currentIndex < assets.count
+            menuItem.title = (hasAsset && assets[currentIndex].isFavorite) ? "Unfavorite" : "Favorite"
+            return hasAsset
+        }
+        return true
     }
     // MARK: - EXIF panel
 
