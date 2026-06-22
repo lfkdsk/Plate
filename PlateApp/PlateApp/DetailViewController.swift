@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import CoreImage
 import AVKit
 import AVFoundation
 import Photos
@@ -50,8 +51,20 @@ final class DetailViewController: NSViewController {
     private let liveBadge = NSView()
     private let liveBadgeLabel = NSTextField(labelWithString: "")
 
+    /// EDR still-image surface, created lazily the first time an HDR photo is
+    /// shown (and only on macOS 14+ with a Metal device). Lives in its own
+    /// magnifying scroll view so HDR photos pinch-to-zoom exactly like SDR ones.
+    /// nil means HDR rendering is unavailable — everything stays on the
+    /// `NSImageView` path. See [[HDRImageView]].
+    private var hdrImageView: HDRImageView?
+    private var hdrScrollView: NSScrollView?
+    /// Fixed-size "HDR" badge, top-right, shown only while an HDR photo is up.
+    /// Doubles as a confirmation that the EDR path engaged.
+    private let hdrBadge = NSView()
+    private let hdrBadgeLabel = NSTextField(labelWithString: "")
+
     /// Which surface is currently front-most. Drives `setMediaMode` show/hide.
-    private enum MediaMode { case image, video, livePhoto }
+    private enum MediaMode { case image, hdrImage, video, livePhoto }
     /// Whole-window overlay holding the floating buttons / caption / strip.
     /// Uses `PassThroughView` so empty areas don't swallow pinch-to-zoom or
     /// two-finger pan gestures — those need to reach the imageScrollView below.
@@ -82,6 +95,10 @@ final class DetailViewController: NSViewController {
 
     private var loadGeneration = 0
     private var hideTimer: Timer?
+    /// The surface currently front-most; kept in sync by `setMediaMode`. Used to
+    /// keep the SDR zoom-upgrade logic from firing while an HDR photo (whose
+    /// stored `mediaType` is still `.image`) is on the EDR surface.
+    private var mediaMode: MediaMode = .image
 
     /// Pixel ceiling of the currently-loaded image for the active asset.
     /// Starts at 4096 (snappy fit-display); upgraded to 8192 once the user
@@ -319,6 +336,41 @@ final class DetailViewController: NSViewController {
             liveBadgeLabel.bottomAnchor.constraint(equalTo: liveBadge.bottomAnchor, constant: -5),
         ])
 
+        // Fixed-size "HDR" badge (top-right), shown only while an HDR photo is on
+        // the EDR surface. Same chrome-independent placement as the LIVE badge
+        // (they never show at once — distinct media modes).
+        hdrBadge.wantsLayer = true
+        hdrBadge.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        hdrBadge.layer?.cornerRadius = 6
+        hdrBadge.isHidden = true
+        hdrBadge.translatesAutoresizingMaskIntoConstraints = false
+        hdrBadge.shadow = {
+            let s = NSShadow()
+            s.shadowColor = NSColor.black.withAlphaComponent(0.5)
+            s.shadowBlurRadius = 5
+            s.shadowOffset = NSSize(width: 0, height: -1)
+            return s
+        }()
+        let hdrAttr = NSMutableAttributedString(string: "HDR")
+        hdrAttr.addAttributes([
+            .font: PlateFont.mono(13, weight: .semibold),
+            .foregroundColor: PlateColor.textPrimary,
+            .kern: 1.0,
+        ], range: NSRange(location: 0, length: hdrAttr.length))
+        hdrBadgeLabel.attributedStringValue = hdrAttr
+        hdrBadgeLabel.alignment = .center
+        hdrBadgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        hdrBadge.addSubview(hdrBadgeLabel)
+        v.addSubview(hdrBadge, positioned: .below, relativeTo: chrome)
+        NSLayoutConstraint.activate([
+            hdrBadge.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            hdrBadge.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
+            hdrBadgeLabel.leadingAnchor.constraint(equalTo: hdrBadge.leadingAnchor, constant: 11),
+            hdrBadgeLabel.trailingAnchor.constraint(equalTo: hdrBadge.trailingAnchor, constant: -11),
+            hdrBadgeLabel.topAnchor.constraint(equalTo: hdrBadge.topAnchor, constant: 5),
+            hdrBadgeLabel.bottomAnchor.constraint(equalTo: hdrBadge.bottomAnchor, constant: -5),
+        ])
+
         loadCurrent()
 
         NotificationCenter.default.addObserver(
@@ -439,12 +491,17 @@ final class DetailViewController: NSViewController {
 
     // MARK: - Media surfaces
 
-    /// Show / hide the three content surfaces so exactly one is front-most.
+    /// Show / hide the content surfaces so exactly one is front-most.
     private func setMediaMode(_ mode: MediaMode) {
-        imageScrollView.isHidden     = (mode != .image)
-        playerView?.isHidden         = (mode != .video)
+        mediaMode = mode
+        imageScrollView.isHidden      = (mode != .image)
+        hdrScrollView?.isHidden       = (mode != .hdrImage)
+        playerView?.isHidden          = (mode != .video)
         livePhotoScrollView?.isHidden = (mode != .livePhoto)
-        liveBadge.isHidden           = (mode != .livePhoto)
+        liveBadge.isHidden            = (mode != .livePhoto)
+        hdrBadge.isHidden             = (mode != .hdrImage)
+        // Release the half-float HDR buffer whenever the EDR surface isn't front.
+        if mode != .hdrImage { hdrImageView?.clear() }
     }
 
     /// Pause + release the active player / Live Photo. Safe to call when nothing
@@ -458,22 +515,72 @@ final class DetailViewController: NSViewController {
     }
 
     private func showImage(asset: Asset, generation: Int) {
-        setMediaMode(.image)
         loadedAtMaxPixel = 0
         let url = library.absoluteURL(forRelative: asset.primary)
         let targetMaxPixel = Self.fastMaxPixel
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Probe for HDR first. On macOS 14+ an HDR photo (gain map / PQ / HLG)
+            // decodes to an extended-range CIImage we route to the EDR surface;
+            // everything else falls through to the unchanged NSImageView path.
+            var hdrImage: CIImage?
+            if #available(macOS 14.0, *) {
+                hdrImage = Self.loadHDRImage(url: url)
+            }
+            if let hdrImage = hdrImage {
+                DispatchQueue.main.async {
+                    guard let self = self, self.loadGeneration == generation else { return }
+                    // If the EDR surface can't be created (no Metal device), fall
+                    // back to the standard decode rather than showing nothing.
+                    if self.showHDR(image: hdrImage) { return }
+                    self.decodeAndApplySDR(url: url, maxPixel: targetMaxPixel, generation: generation)
+                }
+                return
+            }
             let image = Self.decodeDownsampled(url: url, maxPixel: targetMaxPixel)
             DispatchQueue.main.async {
                 guard let self = self, self.loadGeneration == generation else { return }
-                if let image = image {
-                    self.fastImage = image
-                    self.crossfadeImage()
-                    self.applyImage(image)
-                    self.loadedAtMaxPixel = targetMaxPixel
-                }
+                self.applySDR(image, maxPixel: targetMaxPixel)
             }
         }
+    }
+
+    /// Apply an already-decoded SDR image to the NSImageView surface (the
+    /// original, unchanged path), switching the front surface to `.image`.
+    private func applySDR(_ image: NSImage?, maxPixel: Int) {
+        guard let image = image else { return }
+        setMediaMode(.image)
+        fastImage = image
+        crossfadeImage()
+        applyImage(image)
+        loadedAtMaxPixel = maxPixel
+    }
+
+    /// Decode off-main then apply on main — the no-Metal fallback for an image
+    /// that probed as HDR but couldn't get an EDR surface.
+    private func decodeAndApplySDR(url: URL, maxPixel: Int, generation: Int) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let image = Self.decodeDownsampled(url: url, maxPixel: maxPixel)
+            DispatchQueue.main.async {
+                guard let self = self, self.loadGeneration == generation else { return }
+                self.applySDR(image, maxPixel: maxPixel)
+            }
+        }
+    }
+
+    /// Route an HDR `CIImage` to the EDR surface, sized + fit like the SDR path.
+    /// Returns false when the surface is unavailable (no Metal) so the caller can
+    /// fall back to SDR.
+    @discardableResult
+    private func showHDR(image: CIImage) -> Bool {
+        guard let hdrView = ensureHDRView() else { return false }
+        setMediaMode(.hdrImage)
+        loadedAtMaxPixel = 0
+        fastImage = nil   // the SDR upgrade/downgrade cache doesn't apply here
+        let size = HDRImageView.displaySize(forExtent: image.extent)
+        hdrView.frame = NSRect(origin: .zero, size: size)
+        hdrView.setImage(image)
+        fitHDRToView()
+        return true
     }
 
     private func showVideo(asset: Asset) {
@@ -606,6 +713,52 @@ final class DetailViewController: NSViewController {
         scroll.magnification = fit
     }
 
+    /// Lazily build the EDR surface and its magnifying scroll view, inserted just
+    /// below the chrome overlay (same recipe as the Live Photo surface). Returns
+    /// nil when there's no Metal device, in which case HDR rendering is disabled
+    /// and the caller stays on the SDR path.
+    private func ensureHDRView() -> HDRImageView? {
+        if let v = hdrImageView { return v }
+        guard let hdrView = HDRImageView.make() else { return nil }
+        let scroll = NSScrollView()
+        let clip = CenteringClipView()
+        clip.drawsBackground = false
+        scroll.contentView = clip
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 0.01   // recomputed per asset in fitHDRToView
+        scroll.maxMagnification = 6.0
+        scroll.usesPredominantAxisScrolling = false
+        scroll.documentView = hdrView
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scroll, positioned: .below, relativeTo: chrome)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: view.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        hdrImageView = hdrView
+        hdrScrollView = scroll
+        return hdrView
+    }
+
+    /// Fit the EDR documentView to the window. Mirrors `fitLivePhotoToView`.
+    private func fitHDRToView() {
+        guard let scroll = hdrScrollView, let hdrView = hdrImageView else { return }
+        let scrollSize = scroll.frame.size
+        let imgSize = hdrView.frame.size
+        guard imgSize.width > 0, imgSize.height > 0,
+              scrollSize.width > 0, scrollSize.height > 0 else { return }
+        let fit = min(scrollSize.width / imgSize.width, scrollSize.height / imgSize.height)
+        scroll.minMagnification = fit
+        scroll.maxMagnification = max(fit * 6.0, fit + 0.01)
+        scroll.magnification = fit
+    }
+
     /// Space-bar behavior: only a video claims Space (play/pause). Stills AND
     /// Live Photos return false so Space falls through to the established "close
     /// the viewer" dismiss — replaying a Live Photo's motion is done by hovering
@@ -634,9 +787,11 @@ final class DetailViewController: NSViewController {
     // MARK: - High-res upgrade
 
     @objc private func didEndLiveMagnify(_ note: Notification) {
-        // Magnification only applies to the still image surface; video / Live
-        // Photo manage their own scaling.
-        guard currentIndex >= 0, currentIndex < assets.count,
+        // Magnification only applies to the SDR still surface; video / Live Photo
+        // / HDR manage their own scaling. (An HDR photo's stored mediaType is
+        // still `.image`, so gate on the live surface, not the asset kind.)
+        guard mediaMode == .image,
+              currentIndex >= 0, currentIndex < assets.count,
               assets[currentIndex].mediaType == .image else { return }
         upgradeIfNeeded()
         downgradeIfNeeded()
@@ -782,6 +937,15 @@ final class DetailViewController: NSViewController {
            abs(scroll.magnification - scroll.minMagnification) < 0.001 {
             fitLivePhotoToView()
         }
+        // HDR surface: refit when not zoomed, and (re)draw so the EDR layer has a
+        // valid frame to present into — covers first appearance and window resize
+        // / display change.
+        if let scroll = hdrScrollView, !scroll.isHidden {
+            if abs(scroll.magnification - scroll.minMagnification) < 0.001 {
+                fitHDRToView()
+            }
+            hdrImageView?.render()
+        }
     }
 
     private static func decodeDownsampled(url: URL, maxPixel: Int) -> NSImage? {
@@ -796,6 +960,44 @@ final class DetailViewController: NSViewController {
             return nil
         }
         return NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+    }
+
+    /// macOS 14+. Returns an HDR-expanded, upright `CIImage` when `url` is an HDR
+    /// photo — an Apple/Adobe gain-map image, or one encoded with a PQ/HLG
+    /// transfer function — and nil otherwise (caller then uses the SDR path).
+    /// Safe to call off-main.
+    @available(macOS 14.0, *)
+    private static func loadHDRImage(url: URL) -> CIImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+
+        // Gain-map HDR — the dominant case (iPhone, recent Android, Adobe). Cheap:
+        // probes only the auxiliary-data header, no full-image decode.
+        let hasGainMap = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            src, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil
+
+        // PQ / HLG stills (10-bit HEIC, HDR video stills). Rare, so only pay the
+        // color-space decode when the file is deep enough to plausibly be HDR and
+        // isn't already a gain-map image.
+        var isPQorHLG = false
+        if !hasGainMap,
+           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+           let depth = (props[kCGImagePropertyDepth] as? NSNumber)?.intValue, depth >= 10,
+           let cg = CGImageSourceCreateImageAtIndex(
+               src, 0, [kCGImageSourceShouldCacheImmediately: false] as CFDictionary),
+           let space = cg.colorSpace {
+            isPQorHLG = CGColorSpaceUsesITUR_2100TF(space)
+        }
+
+        guard hasGainMap || isPQorHLG else { return nil }
+
+        // expandToHDR folds a gain map into extended-range values; for PQ/HLG it's
+        // a harmless no-op (their headroom already lives in the transfer function).
+        // applyOrientationProperty rotates per EXIF, matching the SDR thumbnail
+        // path's kCGImageSourceCreateThumbnailWithTransform.
+        return CIImage(contentsOf: url, options: [
+            .applyOrientationProperty: true,
+            .expandToHDR: true,
+        ])
     }
 
     // MARK: - Actions
