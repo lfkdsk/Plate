@@ -970,10 +970,18 @@ final class DetailViewController: NSViewController {
     private static func loadHDRImage(url: URL) -> CIImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
-        // Gain-map HDR — the dominant case (iPhone, recent Android, Adobe). Cheap:
-        // probes only the auxiliary-data header, no full-image decode.
-        let hasGainMap = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+        // Gain-map HDR — the dominant case. Cheap: probes only the auxiliary-data
+        // header, no full-image decode. Two keys matter and a file may set just
+        // ONE: Apple's HDRGainMap (iPhone HEIC sets this, often both) and the
+        // ISO 21496-1 ISOGainMap (macOS 15+). Hasselblad/Phocus exports — and
+        // Google Ultra HDR — write the ISO gain map WITHOUT Apple's key, so a
+        // HDRGainMap-only check reads them as SDR. Check both.
+        var hasGainMap = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
             src, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil
+        if !hasGainMap, #available(macOS 15.0, *) {
+            hasGainMap = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+                src, 0, kCGImageAuxiliaryDataTypeISOGainMap) != nil
+        }
 
         // PQ / HLG stills (10-bit HEIC, HDR video stills). Rare, so only pay the
         // color-space decode when the file is deep enough to plausibly be HDR and
